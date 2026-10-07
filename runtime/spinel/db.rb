@@ -485,9 +485,11 @@ class DbConn
   # A miss skips the search: @entry_by_sql says the SQL is not cached.
   # New SQL is cached without a cap check; trim! bounds it at lease end.
   def prepare_cached(sql)
+    return prepare_owned(sql, true) if @entry_by_sql[sql].nil?
+
     cached = true
     last = @entries.length - 1
-    i = @entry_by_sql[sql].nil? ? -1 : last
+    i = last
     while i >= 0
       e = @entries[i]
       if e.sql == sql
@@ -522,6 +524,20 @@ class DbConn
     prepare_owned(sql, false)
   end
 
+  # Keep @entries and @entry_by_sql in lockstep: every cached insert and
+  # drop goes through these two so a later eviction path cannot update
+  # one structure without the other.
+  def index_cached(entry)
+    @entries.push(entry)
+    @entry_by_sql[entry.sql] = entry
+    nil
+  end
+
+  def unindex_cached(entry)
+    @entry_by_sql.delete(entry.sql)
+    nil
+  end
+
   def prepare_owned(sql, cached)
     # `SQL.stmt_out` is ONE 8-byte out-buffer for the whole process (an
     # `ffi_buffer`, static C storage). Under parallel OS workers two
@@ -545,10 +561,7 @@ class DbConn
       raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
     end
     entry = Stmt.new(sql, st, cached)
-    if cached
-      @entries.push(entry)
-      @entry_by_sql[sql] = entry
-    end
+    index_cached(entry) if cached
     @open.push(entry)
     st
   end
@@ -597,7 +610,7 @@ class DbConn
     i = @entries.length - 1
     while i >= 0
       if @entries[i].closed
-        @entry_by_sql.delete(@entries[i].sql)
+        unindex_cached(@entries[i])
         @entries.delete_at(i)
       end
       i -= 1
@@ -621,7 +634,7 @@ class DbConn
     i = 0
     while i < @entries.length
       if i < drop_before && !@entries[i].in_use
-        @entry_by_sql.delete(@entries[i].sql)
+        unindex_cached(@entries[i])
         SQL.sqlite3_finalize(@entries[i].ptr)
       else
         keep.push(@entries[i])
@@ -868,6 +881,7 @@ class DbConn
         i += 1
       end
       @entries.clear
+      # Bulk wipe: no per-entry unindex; the map goes with the array.
       @entry_by_sql = {}
     end
     nil
