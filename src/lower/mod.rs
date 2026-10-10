@@ -40,6 +40,7 @@ pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
+pub mod segment_pattern;
 pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
@@ -96,6 +97,7 @@ pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
 pub mod bigdecimal;
+pub mod range_enumerable;
 pub mod to_json;
 pub mod number_to_fs;
 pub mod string_inflections;
@@ -169,6 +171,7 @@ pub mod generated_write_guard;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod known_super_forwarding;
 pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;
@@ -320,6 +323,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("string_inflections", &[]),
     ("to_json", &[]),
     ("bigdecimal", &[]),
+    ("range_enumerable", &[]),
     ("csv_generate", &[]),
     ("presence_in", &[]),
     ("enumerable_ext", &[]),
@@ -784,6 +788,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("string_inflections");
     ran!("to_json");
     ran!("bigdecimal");
+    ran!("range_enumerable");
     ran!("csv_generate");
     ran!("presence_in");
     ran!("enumerable_ext");

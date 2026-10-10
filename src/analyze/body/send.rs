@@ -213,6 +213,7 @@ impl<'a> BodyTyper<'a> {
         recv_ty: Option<&Ty>,
         method: &Symbol,
         args: &[Expr],
+        instance_self: Option<&Ty>,
     ) -> Option<Ty> {
         if !matches!(method.as_str(), "minimum" | "maximum") {
             return None;
@@ -223,6 +224,7 @@ impl<'a> BodyTyper<'a> {
                 Ty::Class { id, .. } => id,
                 _ => return None,
             },
+            Ty::Class { id, .. } if recv.is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })) => id,
             _ => return None,
         };
         let [column_arg] = args else { return None };
@@ -241,7 +243,7 @@ impl<'a> BodyTyper<'a> {
         // A local variable or named scope may already represent a grouped
         // relation. Without retained grouping provenance, do not guess that
         // it is scalar; the catalog deliberately supplies no fallback type.
-        if !recv.is_some_and(|expr| Self::direct_relation_chain(expr, model)) {
+        if !recv.is_some_and(|expr| self.direct_relation_chain(expr, model, instance_self)) {
             return None;
         }
         Some(union_of(value_ty, Ty::Nil))
@@ -255,8 +257,25 @@ impl<'a> BodyTyper<'a> {
         self.classes().get(model)?.attributes.fields.get(col).cloned()
     }
 
-    fn direct_relation_chain(expr: &Expr, model: &ClassId) -> bool {
+    fn direct_relation_chain(&self, expr: &Expr, model: &ClassId, instance_self: Option<&Ty>) -> bool {
         match &*expr.node {
+            // An association reader carries no grouping, unlike a named scope or a local.
+            ExprNode::Send { recv, method, args, block: None, .. }
+                if args.is_empty()
+                    && recv.as_ref().is_none_or(|owner| {
+                        matches!(&*owner.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
+                            || crate::lower::scope_chain::owner_reads_once(owner)
+                    })
+                    && self.has_many_reader(
+                        match recv {
+                            Some(owner) => owner.ty.as_ref(),
+                            None => instance_self,
+                        },
+                        method,
+                    ) =>
+            {
+                true
+            }
             ExprNode::Const { path } => {
                 path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::")
                     == model.0.as_str()
@@ -271,7 +290,44 @@ impl<'a> BodyTyper<'a> {
                     )
                     .is_some_and(|entry| entry.chain == crate::catalog::ChainKind::Builder) =>
             {
-                Self::direct_relation_chain(recv, model)
+                self.direct_relation_chain(recv, model, instance_self)
+            }
+            _ => false,
+        }
+    }
+
+    /// `owner.<assoc>` where `<assoc>` is a has_many of the owner's model
+    /// that `lower::scope_chain` can seed as a relation (`direct_has_many`;
+    /// the owner's shape is checked by the caller, as `assoc_read_target`
+    /// and `owner_reads_once` admit it).
+    fn has_many_reader(&self, owner_ty: Option<&Ty>, assoc: &Symbol) -> bool {
+        let declares = |id: &ClassId| -> bool {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let Some(cid) = current else { return false };
+                let Some(cls) = self.classes().get(cid) else { return false };
+                if cls.direct_has_many.contains(assoc) {
+                    return true;
+                }
+                current = cls.parent.as_ref();
+            }
+            false
+        };
+        match owner_ty {
+            Some(Ty::Class { id, .. }) => declares(id),
+            // A nil owner fails on the reader itself, which is that call's diagnostic, not this one's.
+            Some(Ty::Union { variants }) => {
+                let owners: Vec<&ClassId> = variants
+                    .iter()
+                    .filter_map(|v| match v {
+                        Ty::Class { id, .. } => Some(id),
+                        _ => None,
+                    })
+                    .collect();
+                !owners.is_empty()
+                    && owners.len() + 1 >= variants.len()
+                    && variants.iter().all(|v| matches!(v, Ty::Class { .. } | Ty::Nil))
+                    && owners.iter().all(|id| declares(id))
             }
             _ => false,
         }
@@ -289,6 +345,12 @@ impl<'a> BodyTyper<'a> {
         class_object_receiver: bool,
         block: &Expr,
     ) -> Ctx {
+        if crate::lower::range_enumerable::THROUGH_ARRAY.contains(&method.as_str())
+            && crate::lower::range_enumerable::integer_range(recv_ty)
+        {
+            let array = Ty::Array { elem: Box::new(Ty::Int) };
+            return self.block_ctx_for(outer, Some(&array), method, args, class_object_receiver, block);
+        }
         let mut new_ctx = outer.clone();
         // Required parameters come first, so the extra ones (optional,
         // keyword, keyword rest) leave their positions alone; the Lambda
@@ -1240,6 +1302,13 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "Range" {
                     if let Some(ty) = range_method(method, args.first()) {
                         return ty;
+                    }
+                    // Not answered off the Range: `lower::range_enumerable` reads these through `to_a`.
+                    if crate::lower::range_enumerable::THROUGH_ARRAY.contains(&method.as_str())
+                        && crate::lower::range_enumerable::integer_range(recv_ty)
+                    {
+                        let array = Ty::Array { elem: Box::new(Ty::Int) };
+                        return self.dispatch(Some(&array), method, block_ret, call_args);
                     }
                 }
                 // `ActiveSupport.parse_db_time(<stored text>)` — the
@@ -2980,6 +3049,21 @@ pub(super) fn hash_method(
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },
+        // The supported Rails subset is the non-mutating, one-argument,
+        // no-block form. Keep block conflicts and `deep_merge!` unresolved
+        // rather than claiming semantics the shared runtime does not provide.
+        "deep_merge" if args.len() == 1 && block_ret.is_none() => {
+            match args[0].ty.as_ref() {
+                Some(Ty::Hash {
+                    key: other_key,
+                    value: other_value,
+                }) => Ty::Hash {
+                    key: Box::new(union_of(key.clone(), (**other_key).clone())),
+                    value: Box::new(union_of(value.clone(), (**other_value).clone())),
+                },
+                _ => unknown(),
+            }
+        }
         // `Hash#to_h` is identity (returns self when called without a
         // block; with a block, transforms entries — same shape).
         // Common in controller bodies: `params.expect(...).to_h` to
@@ -3027,7 +3111,7 @@ pub(super) fn hash_method(
         | "select" | "filter" | "reject" | "compact" | "compact!"
         | "select!" | "filter!" | "reject!" | "keep_if" | "delete_if"
         | "merge!" | "update" | "with_defaults" | "with_defaults!"
-        | "reverse_merge" | "reverse_merge!" | "deep_merge" | "deep_merge!"
+        | "reverse_merge" | "reverse_merge!"
         // ActiveSupport's `compact_blank` — `reject(&:blank?)`, so the
         // same shape as the `compact` beside it.
         | "compact_blank" | "compact_blank!"

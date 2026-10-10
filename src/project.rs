@@ -2579,6 +2579,18 @@ module HttpStub
     WebMock.reset! if defined?(WebMock)
     nil
   end
+
+  def self.disable
+    require "webmock"
+    WebMock.disable!
+    nil
+  end
+
+  def self.enable
+    require "webmock"
+    WebMock.enable!
+    nil
+  end
 end
 "##;
 
@@ -3502,6 +3514,14 @@ fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
     const TAIL: &str = "      # <<< generated: instantiate-named\n";
     let mut arms: Vec<(String, String)> = Vec::new();
     for model in &app.models {
+        // Only a class with a table has rows to snapshot, and only it has
+        // `instantiate`: an ActiveModel class (campfire's
+        // `Opengraph::Location`) or the abstract `ApplicationRecord` in
+        // the list was a call to a method nothing defines — spinel
+        // refused the whole build over it.
+        if !app.schema.tables.contains_key(&model.table.0) {
+            continue;
+        }
         let name = model.name.0.as_str().to_string();
         arms.push((name.clone(), name.clone()));
         for sub in &model.sti_subclass_names {
@@ -4455,6 +4475,8 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::ParameterMissing",
     "ActionController::UnpermittedParameters",
     "ActionController::UnknownFormat",
+    "ActionController::BadRequest",
+    "ActionController::InvalidAuthenticityToken",
     "ActionController::RoutingError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
@@ -4487,7 +4509,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     }
     let bundled = matches!(
         name,
-        "URI::HTTP" | "URI::HTTPS" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
@@ -5064,6 +5087,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
     }
 
+    // Rails 8.1.4 ActionController::Head's options-hash implementation
+    // is only emitted for the Ruby family and Spinel, not strict targets.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_head.rbs")
+            .map_err(|e| format!("read runtime/spinel/action_controller_head.rbs: {e}"))?;
+        files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
+    }
+
     // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
     // runtime/http_authentication.rb (ruby family only). It types the
     // block parameters the helpers yield, which the app's blocks compare.
@@ -5215,7 +5246,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // scaffold (strict targets literalize controller_name/path).
         // Listed before active_support_ext so require_relative resolves.
         "active_support_inflections",
+        "active_support_number_helper",
+        "active_support_number_helper_mixin",
+        "action_view_number_helper",
+        "action_view_number_helper_mixin",
         "active_support_ext",
+        "hash_deep_merge",
         "security_utils",
         "params",
         "action_text",
@@ -5280,7 +5316,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // `I18n.locale` / `default_locale` — the locale campfire folds
         // into its cache keys. Rails' default, `:en`; setting one is
         // not modeled (see the file's header).
-        "i18n",
+        "i18n_locale",
     ] {
         let rb = format!("runtime/ruby/{stem}.rb");
         let content = crate::runtime_files::read_to_string(&rb)?;
@@ -5751,10 +5787,22 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // One require, in the helper every test file loads — the place the
     // app put it.
     if let Some((_, helper)) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb") {
-        for (_, entry) in &needed {
+        for (gem, entry) in &needed {
             let line = format!("require {entry:?}");
-            if !helper.contains(&line) {
-                helper.insert_str(0, &format!("{line}\n"));
+            if helper.contains(&line) {
+                continue;
+            }
+            // WebMock AFTER the app has loaded, as Rails' test_helper
+            // orders it (`config/environment`, then `webmock/minitest`):
+            // the gem swaps `Net::HTTP` for its own subclass while it is
+            // enabled, so an app class that subclasses `Net::HTTP` at
+            // load (campfire's `WebPush::Connections::HTTP`) would
+            // otherwise inherit WebMock's, and once a test disables
+            // WebMock to reach a real server its `start` breaks.
+            const BOOT: &str = "require_relative \"../boot\"\n";
+            match helper.find(BOOT) {
+                Some(at) if *gem == "webmock" => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
+                _ => helper.insert_str(0, &format!("{line}\n")),
             }
         }
         let with_mocha = needed.iter().any(|(gem, _)| *gem == "mocha");
@@ -6806,7 +6854,13 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':');
             let tail = at + konst.len();
             let tail_ok = matches!(b.get(tail), Some(b'.' | b'[' | b'('))
-                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'));
+                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
+                // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
+                || (matches!(b.get(tail), None | Some(b',' | b' ')) && {
+                    let before = line[..at].trim_start();
+                    before == "rescue " || before == "raise "
+                        || (before.starts_with("rescue ") && before.trim_end().ends_with(','))
+                });
             if head_ok && tail_ok {
                 return true;
             }
@@ -6906,7 +6960,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 18] = [
+const BUNDLED: [(&str, &str); 19] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -6957,6 +7011,9 @@ const BUNDLED: [(&str, &str); 18] = [
     // TimeLimitedVideoPreviewer#capture. Default gem on CRuby/JRuby;
     // Spinel takes `runtime/ruby/timeout.rb` via spinel_files.
     ("Timeout", "timeout"),
+    // `rescue SocketError` — the socket extension's class, loaded by Rails
+    // before the app; spinel's runtime defines it without a package.
+    ("SocketError", "socket"),
     // `Shellwords.escape`: a default gem that a booted Rails 8.1 app has
     // already loaded, so apps call it without a require. INERT on our
     // trees: `runtime/spinel/shellwords.rb` defines the module (no
@@ -8106,6 +8163,18 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_exception_class_is_named_only_in_rescue_or_raise_position() {
+        assert!(names_constant("  rescue SocketError => e\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error, SocketError\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error,SocketError\n", "SocketError"));
+        assert!(names_constant("  raise SocketError, \"down\"\n", "SocketError"));
+        assert!(names_constant("  raise SocketError\n", "SocketError"));
+        assert!(!names_constant("  raise \"Timeout waiting for pool tasks\"\n", "Timeout"));
+        assert!(!names_constant("  rescue => e # SocketError here\n", "SocketError"));
+        assert!(!names_constant("  raise Error, \"SocketError down\"\n", "SocketError"));
+    }
 
     #[test]
     fn bundled_instance_method_gate_is_scoped_to_model_receivers() {

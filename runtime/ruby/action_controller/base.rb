@@ -1,6 +1,12 @@
 require_relative "../action_dispatch/flash"
 require_relative "../action_dispatch/session"
 require_relative "../action_view"
+require_relative "../mime"
+
+module AbstractController
+  class DoubleRenderError < StandardError
+  end
+end
 
 module ActionController
   # One-slot array so class-level CSRF state is a store every target
@@ -73,10 +79,14 @@ module ActionController
     i = 0
     while i < n
       byte = bytes[i]
-      return false if byte <= 32 || byte == 34 || byte == 58 || byte == 127
+      return false unless header_key_byte_ok?(byte)
       i += 1
     end
     true
+  end
+
+  def self.header_key_byte_ok?(byte)
+    byte > 32 && byte != 34 && byte != 58 && byte != 127
   end
 
   def self.header_value_ok?(v)
@@ -283,14 +293,18 @@ module ActionController
     # `()` not `Option`.
     def []=(key, value)
       if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
-        i = index_of(key)
-        if i < 0
-          @keys << key
-          @lower << key.downcase
-          @vals << value
-        else
-          @vals[i] = value
-        end
+        store_value(key, value)
+      end
+    end
+
+    def store_value(key, value)
+      i = index_of(key)
+      if i < 0
+        @keys << key
+        @lower << key.downcase
+        @vals << value
+      else
+        @vals[i] = value
       end
     end
 
@@ -298,15 +312,28 @@ module ActionController
     # Rack::Headers stores them that way, so `slice` hands them back so.
     def slice(*names)
       out = {}
-      names.each do |name|
-        i = index_of(name)
-        out[@lower[i].to_s] = @vals[i].to_s if i >= 0
+      name_index = 0
+      while name_index < names.length
+        name = names[name_index]
+        found = index_of(name)
+        out[@lower[found].to_s] = @vals[found].to_s if found >= 0
+        name_index += 1
       end
       out
     end
 
     def merge!(other)
-      other.each { |key, value| self[key] = value }
+      keys = other.keys
+      values = other.values
+      i = 0
+      while i < keys.length
+        key = keys[i].to_s
+        value = values[i]
+        if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
+          store_value(key, value)
+        end
+        i += 1
+      end
       self
     end
 
@@ -314,9 +341,16 @@ module ActionController
       i = index_of(key)
       return nil if i < 0
       value = @vals[i]
-      @keys.delete_at(i)
-      @lower.delete_at(i)
-      @vals.delete_at(i)
+      j = i
+      while j + 1 < @keys.length
+        @keys[j] = @keys[j + 1]
+        @lower[j] = @lower[j + 1]
+        @vals[j] = @vals[j + 1]
+        j += 1
+      end
+      @keys.pop()
+      @lower.pop()
+      @vals.pop()
       value
     end
 
@@ -480,6 +514,7 @@ module ActionController
     # response object exposes.
     def content_type=(value)
       @content_type = value
+      @content_type_explicit = true
       @content_type
     end
 
@@ -504,8 +539,10 @@ module ActionController
       @query_string = +""
       @accepts_any_format = false
       @content_type = "text/html; charset=utf-8"
+      @content_type_explicit = false
       @headers = ActionController::HeaderStore.new
       @performed = false
+      @head_response = false
       # Set unconditionally, not on first `expires_in`: an ivar a strict
       # target never sees assigned has no type to infer, and the readers
       # above are reachable on every controller. 0 = "no max-age
@@ -520,6 +557,13 @@ module ActionController
     # halting semantics: a filter that responds skips the action.
     def performed?
       @performed
+    end
+
+    # Rails' head vs redirect_to: a 3xx from `head` is not a Location
+    # redirect body. Overlay `head` sets the flag; the shared keyword
+    # form does not, so this stays false there.
+    def head_response?
+      @head_response
     end
 
     # Discard the current session (Rails' logout idiom). The dispatch
@@ -634,34 +678,32 @@ module ActionController
       nil
     end
 
-    # `head(:no_content, content_type: "application/json")` — empty
-    # body, status only. The `content_type` kwarg is set by the
-    # respond_to-flattener's JSON branch when it preserves a
-    # `head :sym` terminal; html branches omit it and the default
-    # text/html stands. (Body-empty responses make Content-Type
-    # mostly irrelevant per RFC 7230, but some HTTP clients still
-    # parse it, so being explicit costs nothing.)
-    # `location:` is Rails' own option and campfire's bot create writes
-    # it (`head :created, location: message_url(@message)`) — a 201 that
-    # names the resource it made. It is NOT a redirect: `redirect?` gates
-    # on a 3xx status, so setting the location beside a 201 records the
-    # URL without turning the response into one.
+    # The strict cross-target runtimes support the bounded status and
+    # keyword form only. Rails 8.1.4's options-hash semantics live in the
+    # Ruby/Spinel overlay, where their richer runtime dependencies exist.
+    # Strict emit cannot construct the custom DoubleRenderError in every
+    # target, so reject a second response with the supported ArgumentError.
     def head(status, content_type: nil, location: nil)
+      raise ArgumentError, "response has already been performed" if @performed
+      resolved_status = resolve_status(status)
       @location = ActionController.sanitize_location(location) unless location.nil?
-      @status = resolve_status(status)
-      @body   = +""
+      @status = resolved_status
+      @body = +""
       @performed = true
-      @content_type = content_type unless content_type.nil?
+      if (@status >= 100 && @status < 200) || @status == 204 || @status == 205 || @status == 304
+        @content_type = ""
+      else
+        @content_type = content_type unless content_type.nil?
+        @content_type = media_type
+      end
       nil
     end
 
     # `response.headers["Expires"] = …` — Rails actions reach header
     # state through the response object; this controller IS its own
-    # buffered response, so `response` returns self and `headers` the
-    # extra-header hash. The CGI harness emits status/body/
-    # content-type today; extra headers are buffered but unsent — a
-    # ledgered seam (they tune caching, not content), wired through
-    # the harness when a consumer needs them.
+    # response, so `response` returns self and `headers` the extra-header
+    # store. The Ruby CGI and Rack dispatchers copy this store to the
+    # outgoing response.
     def response
       self
     end
@@ -687,9 +729,8 @@ module ActionController
     # timestamp and answer 304 on a match. Neither half of that
     # comparison exists here: this controller has no request object
     # (only `@request_format`), so there is nothing to read the
-    # conditional headers FROM, and the extra-header hash above is
-    # buffered but never sent, so there is nothing to write the
-    # validators TO.
+    # conditional headers FROM. Although the extra-header store is sent
+    # with the response, `fresh_when` does not populate validators in it.
     #
     # What IS available is the answer Rails gives when a client sends
     # no conditional header at all: the response is stale, render it.
@@ -738,14 +779,10 @@ module ActionController
     # a NoMethodError into an ArgumentError at those two and looked like
     # progress.
     #
-    # NO HEADER IS WRITTEN. Composing the `Cache-Control` string here
-    # and parking it in the buffered-but-unsent `headers` hash above
-    # would be work nothing reads — and `@headers[k] = v` does not
-    # survive the Rust emitter, which renders a Hash index-assign as
-    # `self.headers[k] = v` where `HashMap` wants `.insert()` (E0594:
-    # `IndexMut` is not implemented). The two readers hold everything
-    # the response needs; the wire spelling is the harness's to compose
-    # when it starts emitting headers at all.
+    # NO Cache-Control HEADER IS WRITTEN. The two cache-control facts are response
+    # state; dispatch does not translate them into a Cache-Control
+    # header. Arbitrary headers written through headers are separately
+    # copied to the Ruby-family response by dispatch.
     def expires_in(seconds, public: false, stale_while_revalidate: 0)
       @cache_control_max_age = seconds
       @cache_control_public = public
@@ -758,10 +795,8 @@ module ActionController
 
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
-    # render. `disposition` is accepted but not yet buffered — extra
-    # headers ride the same unsent seam as `headers` above, and the
-    # Content-Disposition write joins it when the harness wires
-    # header emission.
+    # render. `disposition` is retained as a Content-Disposition
+    # response header.
     def send_data(data, type: "application/octet-stream", disposition: "attachment")
       @body = data
       @content_type = type
