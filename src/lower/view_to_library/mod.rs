@@ -2463,12 +2463,16 @@ pub(crate) fn partial_call_contracts(
         let record = singularize(last_segment(dir));
         let rewritten = rewrite_ivars_to_locals(&view.body);
         let mut extras = collect_extra_params(&rewritten, &record);
+        // RAW ivar names, as in the strict-locals arm above: a call site
+        // emits `@<name>` from them and matches them against `locals:`
+        // keys. The partial's params are their `safe_local` forms, in the
+        // same order; `@class_` is an ivar no action assigns (#571).
         let closure: Vec<String> = closures
             .get(&key)
             .map(|ivs| {
                 ivs.iter()
-                    .map(|s| crate::naming::safe_local(s.as_str()))
-                    .filter(|n| n != &record)
+                    .map(|s| s.as_str().to_string())
+                    .filter(|n| crate::naming::safe_local(n) != record)
                     .collect()
             })
             .unwrap_or_default();
@@ -2479,7 +2483,9 @@ pub(crate) fn partial_call_contracts(
                 }
             }
         }
-        drop_closure_names(&mut extras, &closure);
+        let closure_params: Vec<String> =
+            closure.iter().map(|n| crate::naming::safe_local(n)).collect();
+        drop_closure_names(&mut extras, &closure_params);
         out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false });
     }
     out
