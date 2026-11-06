@@ -311,14 +311,17 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-// Answers shared only within one immutable-catalog phase and its workers.
+// Answers shared within one immutable-catalog phase and its workers, and with a later phase of the same session over
+// the same catalog (`with_session_plans`).
 #[derive(Clone, Default)]
 pub(crate) struct SharedPlanCache(std::sync::Arc<std::sync::Mutex<PhasePlans>>);
 
 /// One catalog's answers. `catalog` is the address of the catalog they were
-/// planned over, taken at the first plan kept: a call planned over any other
-/// catalog is neither answered from here nor kept, so a phase that reaches a
-/// second catalog cannot read the first one's plans.
+/// planned over: the one the cache was made for (`SharedPlanCache::over`,
+/// every phase the compiler runs), else the one of the first plan kept
+/// (`with_plan_cache`). A call planned over any other catalog is neither
+/// answered from here nor kept, so a phase that reaches a second catalog
+/// cannot read the first one's plans.
 #[derive(Default)]
 struct PhasePlans {
     catalog: Option<usize>,
@@ -327,6 +330,16 @@ struct PhasePlans {
 
 fn address(catalog: &Catalog) -> usize {
     catalog as *const Catalog as usize
+}
+
+impl SharedPlanCache {
+    /// An empty cache that answers for `catalog` alone.
+    fn over(catalog: &Catalog) -> Self {
+        SharedPlanCache(std::sync::Arc::new(std::sync::Mutex::new(PhasePlans {
+            catalog: Some(address(catalog)),
+            answers: Default::default(),
+        })))
+    }
 }
 
 pub(crate) fn plan_cache_snapshot() -> Option<SharedPlanCache> {
@@ -353,11 +366,55 @@ struct PlanKey {
     in_view: bool,
 }
 
-/// Keep plans for one phase over one immutable catalog: the first one a
-/// plan is kept for. Nested analyses start a fresh cache: an outer session
-/// may analyze another app/catalog.
+/// Keep plans for one phase over one immutable catalog (the first one a
+/// plan is kept for), in a fresh cache shared with no other phase
+/// (`with_catalog_plans` shares a session's).
 pub fn with_plan_cache<T>(f: impl FnOnce() -> T) -> T {
     let _cache = install_plan_cache(Some(Default::default()));
+    f()
+}
+
+thread_local! {
+    /// The catalog the session's phases last planned over, and their plans (`with_session_plans`).
+    static SESSION: std::cell::RefCell<Option<(std::sync::Weak<Catalog>, SharedPlanCache)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Let the phases inside `f` that plan over one catalog share their plans: the fold then reads what typing planned
+/// instead of planning every call again. A plan is a function of the catalog and the `PlanKey` alone, so a phase over
+/// the same `Arc` gets the same answers; a phase over another catalog starts over. The plans go when the fold has read
+/// them (`apply_i18n_translate_lowering`), and at the latest when `f` returns.
+pub fn with_session_plans<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(std::sync::Weak<Catalog>, SharedPlanCache)>);
+    impl Drop for Restore {
+        fn drop(&mut self) { SESSION.with(|s| *s.borrow_mut() = self.0.take()); }
+    }
+    let _restore = Restore(SESSION.with(|s| s.replace(Some((std::sync::Weak::new(), SharedPlanCache::default())))));
+    f()
+}
+
+/// The cache for one phase over `catalog`: the session's, if the session last planned over this same `Arc`, else a
+/// fresh one (which the session then keeps for this catalog). Outside a session, always fresh.
+fn phase_plans(catalog: &std::sync::Arc<Catalog>) -> SharedPlanCache {
+    // Bound before any plan is kept, to the catalog typing and the fold both plan over (`or_rails_default`): a call
+    // planned over anything else is not kept under this `Arc`'s name, in this phase or a later one.
+    let fresh = || SharedPlanCache::over(catalog.or_rails_default());
+    SESSION.with(|s| match s.borrow_mut().as_mut() {
+        None => fresh(),
+        Some((seen, plans)) => {
+            // A `Weak` keeps the allocation, so no other catalog can reuse this address while it is held.
+            if !seen.upgrade().is_some_and(|c| std::sync::Arc::ptr_eq(&c, catalog)) {
+                *seen = std::sync::Arc::downgrade(catalog);
+                *plans = fresh();
+            }
+            plans.clone()
+        }
+    })
+}
+
+/// `with_plan_cache` for a phase over `catalog`, with the session's plans for it.
+pub fn with_catalog_plans<T>(catalog: &std::sync::Arc<Catalog>, f: impl FnOnce() -> T) -> T {
+    let _cache = install_plan_cache(Some(phase_plans(catalog)));
     f()
 }
 
@@ -373,7 +430,8 @@ fn plan_key(call: &Call, in_view: bool) -> PlanKey {
     }
 }
 
-/// `plans` for the call written as `recv.method(args)`, kept for the length of `with_plan_cache`.
+/// `plans` for the call written as `recv.method(args)`, kept in the installed cache: for the phase, and inside a
+/// session for the later phases over the same catalog.
 fn plans_at(catalog: &Catalog, call: &Call, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
     planned(catalog, call, in_view, Clone::clone)
 }
@@ -385,7 +443,7 @@ fn plans_ok_at(catalog: &Catalog, call: &Call, in_view: bool) -> Result<(), Stri
     planned(catalog, call, in_view, |out| out.as_ref().map(|_| ()).map_err(Clone::clone))
 }
 
-/// `read` of the call's `plans`, kept for the length of `with_plan_cache`.
+/// `read` of the call's `plans`, kept as `plans_at` says.
 fn planned<T>(
     catalog: &Catalog,
     call: &Call,
@@ -684,8 +742,20 @@ thread_local! {
 /// templates. A controller's instance methods (its actions and the
 /// private methods they call) take the controller's `t`.
 pub fn apply_i18n_translate_lowering(app: &mut App) {
-    // This catalog is a new phase, independent of analysis and outer sessions.
-    let _cache = install_plan_cache(Some(Default::default()));
+    // The fold is the last reader of a session's plans: the session lets them go when this returns.
+    struct LastReader;
+    impl Drop for LastReader {
+        fn drop(&mut self) {
+            SESSION.with(|s| {
+                if let Some(kept) = s.borrow_mut().as_mut() {
+                    *kept = (std::sync::Weak::new(), SharedPlanCache::default());
+                }
+            });
+        }
+    }
+    let _last = LastReader;
+    // A new phase: inside a session it reads the plans typing made over this same catalog, else it starts fresh.
+    let _cache = install_plan_cache(Some(phase_plans(&app.i18n)));
     TABLE.with(|t| *t.borrow_mut() = Default::default());
     RUNTIME_SITES.with(|r| *r.borrow_mut() = Default::default());
     // A handle on the shared catalog, not a copy: the walk below borrows `app` mutably.
@@ -1813,6 +1883,96 @@ mod phase_cache_tests {
     }
 
     #[test]
+    fn analyze_and_lower_plans_a_translate_call_once() {
+        // One helper, one `t`: every phase walks a single item, so no worker thread plans out of this one's sight.
+        let files = [
+            ("config/locales/en.yml", "en:\n  probe:\n    label: Probe\n"),
+            ("app/helpers/probe_helper.rb", "module ProbeHelper\n  def probe_label\n    t(\"probe.label\")\n  end\nend\n"),
+        ];
+        let app = || crate::ingest::ingest_app_from_tree(
+            files.iter().map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec())).collect(),
+        ).unwrap();
+        let planned_by = |run: &dyn Fn()| {
+            let before = computed();
+            run();
+            computed() - before
+        };
+        let typing = planned_by(&|| {
+            let mut app = app();
+            crate::analyze::Analyzer::new(&app).analyze(&mut app);
+        });
+        let session = planned_by(&|| {
+            crate::session::analyze_and_lower(&mut app());
+        });
+        assert!(typing > 0, "typing plans the helper's `t`");
+        assert_eq!(session, typing, "the fold planned what typing had planned");
+        // The fold is the plans' last reader: the session holds them until it has run, and not after.
+        let mut app = app();
+        with_session_plans(|| {
+            crate::analyze::Analyzer::new(&app).analyze(&mut app);
+            assert_eq!(std::sync::Arc::weak_count(&app.i18n), 1, "typing's plans wait for the fold");
+            let before = computed();
+            // A second typing run over a clone of the app, as after `source_gem_shake`: the same catalog `Arc`.
+            let mut trimmed = app.clone();
+            crate::analyze::Analyzer::new(&trimmed).analyze(&mut trimmed);
+            apply_i18n_translate_lowering(&mut app);
+            assert_eq!(computed(), before, "the second run and the fold read them");
+            assert_eq!(std::sync::Arc::weak_count(&app.i18n), 0, "and the session let them go");
+        });
+    }
+
+    #[test]
+    fn a_session_that_unwinds_is_closed() {
+        let catalog = {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.building().insert("label".into(), "first".into());
+            std::sync::Arc::new(c)
+        };
+        let call = Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: None };
+        let planned_in_a_phase = || {
+            let before = computed();
+            with_catalog_plans(&catalog, || plans_at(&catalog, &call, false).unwrap());
+            computed() - before
+        };
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_session_plans(|| -> () {
+                assert_eq!(planned_in_a_phase(), 1);
+                std::panic::resume_unwind(Box::new("inside the session"))
+            })
+        }));
+        // The unwind is the one started above, not a failed assertion inside the session.
+        assert_eq!(unwound.unwrap_err().downcast_ref::<&str>(), Some(&"inside the session"));
+        // No session is left open behind the unwind: every phase starts fresh, as outside one.
+        assert_eq!(planned_in_a_phase(), 1);
+        assert_eq!(planned_in_a_phase(), 1);
+    }
+
+    #[test]
+    fn a_catalog_changed_in_place_is_planned_again() {
+        let mut catalog = {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.building().insert("label".into(), "first".into());
+            std::sync::Arc::new(c)
+        };
+        let call = Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: None };
+        with_session_plans(|| {
+            let before = with_catalog_plans(&catalog, || plans_at(&catalog, &call, false).unwrap());
+            assert_eq!(before, plans(&catalog, &call, false).unwrap());
+            // The session holds the catalog weakly: it keeps no catalog alive, and the owner below is the only one.
+            assert_eq!((std::sync::Arc::strong_count(&catalog), std::sync::Arc::weak_count(&catalog)), (1, 1));
+            // The only strong owner changes the catalog: the session's `Weak` must not keep its old plans.
+            std::sync::Arc::make_mut(&mut catalog).entries.building().insert("label".into(), "changed".into());
+            let after = with_catalog_plans(&catalog, || plans_at(&catalog, &call, false).unwrap());
+            assert_ne!(after, before);
+            assert_eq!(after, plans(&catalog, &call, false).unwrap());
+        });
+    }
+
+    #[test]
     fn nested_phases_do_not_reuse_another_catalogs_answer() {
         let catalog = |text: &str| {
             let mut c = Catalog::default();
@@ -1857,6 +2017,73 @@ mod phase_cache_tests {
             assert_eq!(plans_at(&first, &en, false).unwrap(), plans_en);
             assert_eq!(plans_at(&first, &fr, false), plans_fr);
             assert_eq!(computed(), before);
+        });
+    }
+
+    #[test]
+    fn a_sessions_phases_share_plans_only_over_the_same_catalog() {
+        let catalog = |text: &str| {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.building().insert("label".into(), text.into());
+            std::sync::Arc::new(c)
+        };
+        let first = catalog("first");
+        // Equal to `first`, but another catalog: identity, not content, decides.
+        let twin = std::sync::Arc::new((*first).clone());
+        let call = Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: None };
+        let expected = plans(&first, &call, false).unwrap();
+        // How many times a phase over `over` had to plan the call: 0 when it read a kept answer.
+        let planned_in_a_phase_over = |over: &std::sync::Arc<Catalog>| {
+            let before = computed();
+            assert_eq!(with_catalog_plans(over, || plans_at(over, &call, false).unwrap()), expected);
+            computed() - before
+        };
+        with_session_plans(|| {
+            assert_eq!(planned_in_a_phase_over(&first), 1);
+            // A later phase over the same `Arc` reads what the first one planned.
+            assert_eq!(planned_in_a_phase_over(&first), 0);
+            // Another catalog, even an equal one, starts over.
+            assert_eq!(planned_in_a_phase_over(&twin), 1);
+            // That phase replaced the session's catalog: `first`'s plans are gone.
+            assert_eq!(planned_in_a_phase_over(&first), 1);
+            // A nested session starts empty, and the outer one keeps its plans after it: not the nested one's, which
+            // ended over another catalog.
+            with_session_plans(|| {
+                assert_eq!(planned_in_a_phase_over(&first), 1);
+                assert_eq!(planned_in_a_phase_over(&twin), 1);
+            });
+            assert_eq!(planned_in_a_phase_over(&first), 0);
+        });
+        // Outside a session, and after one, every phase starts fresh.
+        assert_eq!(planned_in_a_phase_over(&first), 1);
+        assert_eq!(planned_in_a_phase_over(&first), 1);
+    }
+
+    #[test]
+    fn a_sessions_cache_is_its_catalogs_before_the_first_plan() {
+        let catalog = |text: &str| {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.building().insert("label".into(), text.into());
+            std::sync::Arc::new(c)
+        };
+        let (first, second) = (catalog("first"), catalog("second"));
+        let call = Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: None };
+        let (of_first, of_second) = (plans(&first, &call, false).unwrap(), plans(&second, &call, false).unwrap());
+        assert_ne!(of_first, of_second);
+        with_session_plans(|| {
+            // The first call of a phase over `first` plans over another catalog: it is answered, and not kept.
+            assert_eq!(with_catalog_plans(&first, || plans_at(&second, &call, false).unwrap()), of_second);
+            // A later phase over `first` plans `first` itself, and the other catalog again when it is asked.
+            let before = computed();
+            with_catalog_plans(&first, || {
+                assert_eq!(plans_at(&first, &call, false).unwrap(), of_first);
+                assert_eq!(plans_at(&second, &call, false).unwrap(), of_second);
+            });
+            assert_eq!(computed(), before + 2);
         });
     }
 }
