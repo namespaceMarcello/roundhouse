@@ -13,8 +13,23 @@
 # while this one was being written, falls through to the routes instead of
 # answering 404. When the page cache writes under public/, a miss also
 # looks at the disk, which is how a page another worker cached is found.
+#
+# The page cache writes only through `cache_page` (`caches_page` expands to
+# it). When nothing the app emits calls it, boot.rb says so
+# (`no_page_writes!`, src/project.rs), no page can appear under public/
+# while the app runs, and a miss stats nothing even with the page cache on:
+# three `File.file?` per GET that is not a public file, 1-2% of a campfire
+# page and 3% of `/up` (paired A/B, one Puma worker, 2 x 30 blocks).
 module ActionController
   module PublicFiles
+    @page_writes = true
+
+    def self.no_page_writes!
+      @page_writes = false
+      @watch_disk = nil
+      nil
+    end
+
     def self.files
       if @files.nil?
         @files = {}
@@ -54,14 +69,15 @@ module ActionController
       file
     end
 
-    # Whether a page can appear under public/ while the app runs: the page
-    # cache is on and writes there. Only then does a miss look at the disk,
-    # so an app that does not cache into public/ stats nothing per route.
+    # Whether a page can appear under public/ while the app runs: the app
+    # writes pages, the page cache is on and writes there. Only then does a
+    # miss look at the disk, so an app that does not cache into public/
+    # stats nothing per route.
     def self.watch_disk?
       if @watch_disk.nil?
         public_dir = File.expand_path("public")
         cache_dir = File.expand_path(ActionController::Base.page_cache_directory)
-        @watch_disk = ActionController::Base.perform_caching &&
+        @watch_disk = @page_writes && ActionController::Base.perform_caching &&
           (cache_dir == public_dir || cache_dir.start_with?(public_dir + "/"))
       end
       @watch_disk

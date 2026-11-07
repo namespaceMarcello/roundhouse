@@ -3997,6 +3997,68 @@ puts "public files contract passed"
         .assert_passes();
 }
 
+/// With the page cache on, an app that writes no page (nothing it emits
+/// sends `cache_page`) does not stat for a path its boot listing lacks: a
+/// file that appears under public/ after the first request is not served.
+/// An app that writes pages still finds one on disk
+/// (`page_caching::the_static_lookup_decodes_the_path_and_finds_another_workers_page`).
+#[test]
+fn an_app_that_writes_no_page_does_not_watch_public_on_disk() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+ActionController::Base.perform_caching = true
+check.(client.get("/late.html").status == 404, "no public file before it is written")
+File.write("public/late.html", "late\n")
+r = client.get("/late.html")
+check.(r.status == 404 && r.body != "late\n", "a file written after boot is not looked up: #{r.status}")
+puts "no page writes contract passed"
+"##)
+        .assert_passes();
+}
+
+/// A gem compiled with the app has its files' own statements emitted, and
+/// they run at boot: a `cache_page` sent from one keeps the disk watched,
+/// as one sent from the app's classes does. The same gem without that send
+/// leaves the app with no page writer, and boot.rb says so. The statement
+/// is a conditional one: a plain call on a class the tree carries also
+/// joins the boot program (`gem_load_program`), which the scan already read.
+#[test]
+fn a_gem_file_statement_that_sends_cache_page_keeps_public_watched() {
+    const LOCK: &str = "PATH\n  remote: vendor/gems/tessera-1.0.0\n  specs:\n    tessera (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  tessera!\n";
+    const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+    let emitted = |sent: &str| {
+        let gem = format!(
+            "module Tessera\n  def self.pages(&block)\n    @pages = block\n  end\n\n  def self.pages?\n    !@pages.nil?\n  end\nend\n\nTessera.pages {{ |controller| controller.{sent} }} unless Tessera.pages?\n"
+        );
+        let run = emit_and_run::empty_app()
+            .write("roundhouse.yml", "")
+            .write("Gemfile.lock", LOCK)
+            .write("config/application.rb", "require \"tessera\"\n")
+            .write("vendor/gems/tessera-1.0.0/lib/tessera.rb", &gem)
+            .run_ruby("puts Tessera.pages?\n");
+        run.assert_passes();
+        assert_eq!(run.stdout.trim(), "true", "the gem file's statement ran at boot\n{}", run.stderr);
+        let program = run.emitted.join("app/models/roundhouse_files/vendor/gems/tessera-1.0.0/lib/tessera.rb");
+        let program = std::fs::read_to_string(&program).unwrap_or_else(|e| panic!("{}: {e}", program.display()));
+        assert!(program.contains(sent), "the statement is emitted in the file's program:\n{program}");
+        std::fs::read_to_string(run.emitted.join("boot.rb")).unwrap()
+    };
+    let quiet = emitted("to_s");
+    assert!(quiet.contains("require_relative \"runtime/public_files\""), "the tree serves public/:\n{quiet}");
+    assert!(quiet.contains(LINE), "a gem that sends no cache_page leaves the app with no page writer:\n{quiet}");
+    let writer = emitted("cache_page");
+    assert!(!writer.contains(LINE), "a gem file's statement sends cache_page, so the disk stays watched:\n{writer}");
+}
+
 #[test]
 fn class_configuration_shares_a_name_with_an_instance_method() {
     let run = class_configuration::same_name_overlay().run_ruby(class_configuration::SAME_NAME_ASSERTIONS);
