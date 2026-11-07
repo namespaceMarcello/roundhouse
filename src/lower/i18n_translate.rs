@@ -67,6 +67,8 @@ pub(crate) enum Plan {
 /// one per locale it can run in (the `locale:` it names, else each
 /// available locale) and per environment whose fallbacks differ.
 pub(crate) fn plans(catalog: &Catalog, call: &Call, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
+    #[cfg(test)]
+    phase_cache_tests::PLANS_COMPUTED.with(|n| n.set(n.get() + 1));
     let locales = match &call.locale {
         Some(Locale::Literal(l)) if !catalog.locales().contains(l) => {
             return Err(format!("`locale: :{l}`, which is not an available locale"));
@@ -360,17 +362,35 @@ fn plan_key(call: &Call, in_view: bool) -> PlanKey {
 
 /// `plans` for the call written as `recv.method(args)`, kept for the length of `with_plan_cache`.
 fn plans_at(catalog: &Catalog, call: &Call, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
+    planned(catalog, call, in_view, Clone::clone)
+}
+
+/// Whether `plans` answers the call, from the same cache but without
+/// copying the plans: typing asks this of every translate call on every
+/// fixpoint round, and an app with many locales keeps one plan per locale.
+fn plans_ok_at(catalog: &Catalog, call: &Call, in_view: bool) -> Result<(), String> {
+    planned(catalog, call, in_view, |out| out.as_ref().map(|_| ()).map_err(Clone::clone))
+}
+
+/// `read` of the call's `plans`, kept for the length of `with_plan_cache`.
+fn planned<T>(
+    catalog: &Catalog,
+    call: &Call,
+    in_view: bool,
+    read: impl Fn(&Result<Vec<(Variant, Plan)>, String>) -> T,
+) -> T {
     let key = plan_key(call, in_view);
-    if let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.0.lock().unwrap().get(&key).cloned())) {
+    if let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.0.lock().unwrap().get(&key).map(&read))) {
         return hit;
     }
     let out = plans(catalog, call, in_view);
+    let answer = read(&out);
     PLANNED.with(|c| {
         if let Some(m) = c.borrow().as_ref() {
-            m.0.lock().unwrap().insert(key, out.clone());
+            m.0.lock().unwrap().insert(key, out);
         }
     });
-    out
+    answer
 }
 
 /// Whether every key a translate call can look up resolves; `None` when
@@ -401,7 +421,7 @@ fn resolves_uncached(
             .iter()
             .try_for_each(|a| resolves(catalog, recv, method, a, block, site).expect("still a translate call")),
         (Ok(call), None) if counted_by_rule(&call, catalog) => Err(COUNT_BY_RULE.to_string()),
-        (Ok(call), None) => plans_at(catalog, &call, site.in_view()).map(|_| ()),
+        (Ok(call), None) => plans_ok_at(catalog, &call, site.in_view()),
         (Err(reason), None) => Err(reason),
     };
     Some(match answer {
@@ -487,6 +507,11 @@ pub(crate) fn value_answer(catalog: &Catalog, recv: Option<&Expr>, method: &str,
     }
     let full = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
     if crate::i18n::is_html_safe_key(&full) {
+        return None;
+    }
+    // Every variant below reads its value from a catalog `catalog_for` reaches: this one or one of `others`. A key
+    // none of them holds as a value answers `None` at the first variant, so typing's call on every round stops here.
+    if !std::iter::once(catalog).chain(&catalog.others).any(|c| c.values.contains_key(&full)) {
         return None;
     }
     let mut locales = catalog.locales();
@@ -1651,11 +1676,89 @@ mod tree_answer_tests {
         }
         assert!(positive > 0 && negative > 0);
     }
+
+    /// `value_answer` as it read before the early return for a key no
+    /// reachable catalog holds as a value: every variant's chain walked.
+    fn eager_value(catalog: &Catalog, full: &str) -> Option<Vec<crate::i18n::Opaque>> {
+        let mut locales = catalog.locales();
+        for other in &catalog.others {
+            if !locales.contains(&other.locale) {
+                locales.push(other.locale.clone());
+            }
+        }
+        let lands = |c: &Catalog| c.entries.contains_key(full) || c.opaque.contains(full) || c.is_subtree(full);
+        let mut found = Vec::new();
+        for v in catalog.variants(&locales) {
+            let chain = match &v.fallbacks {
+                Some(defaults) => crate::i18n::fallback_chain(&v.locale, defaults),
+                None => vec![v.locale.clone()],
+            };
+            found.push(chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c))?.values.get(full)?.clone());
+        }
+        let first = found.first()?;
+        found.iter().all(|v| std::mem::discriminant(v) == std::mem::discriminant(first)).then_some(found)
+    }
+
+    #[test]
+    fn value_answers_match_every_variant_walked() {
+        // `days` is a value everywhere, `only_fr` only in fr and fr-CA, `regional` only in fr-CA, `en_only` only in en,
+        // `split` a value in en and text in fr.
+        let source = "en:\n  days:\n    - :mon\n    - tue\n  en_only:\n    - a\n  split:\n    - x\n  title: Text\n  menu:\n    title: Menu\nfr:\n  days:\n    - :lun\n  only_fr:\n    - b\n  split: texte\n  title: Texte\nfr-CA:\n  days:\n    - lun\n  only_fr:\n    - c\n  regional:\n    - q\n";
+        let mut files = vec![("locales.yml".into(), source.into())];
+        let (mut catalog, problems) = Catalog::load("en", &mut files);
+        assert!(problems.is_empty());
+        catalog.load_locales(vec!["en".into(), "fr".into(), "fr-CA".into()], FallbackPolicy::default(), &[], &mut files);
+        let recv = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("I18n")] });
+        let keys = ["days", "only_fr", "regional", "en_only", "split", "title", "menu", "menu.title", "missing", ""];
+        let settings = [None, Some(Vec::new()), Some(vec!["en".into()]), Some(vec!["fr".into()]), Some(vec!["fr-CA".into(), "en".into()])];
+        let (mut positive, mut negative) = (0, 0);
+        for default in &settings {
+            for environment in &settings {
+                catalog.fallbacks = FallbackPolicy {
+                    app: default.clone(),
+                    envs: vec![("production".into(), environment.clone()), ("test".into(), default.clone())],
+                    ..Default::default()
+                };
+                for shape in ["loaded", "no others", "an other not available"] {
+                    let mut c = catalog.clone();
+                    match shape {
+                        // A catalog whose `others` were never loaded: only its own values are reachable.
+                        "no others" => c.others.clear(),
+                        // fr-CA stays in `others` (reached by fallbacks and as its own variant) without being available.
+                        "an other not available" => {
+                            c.available.retain(|l| l != "fr-CA");
+                            c.available.extend(["en".into(), "fr".into()]);
+                            c.others.push(c.others[0].clone());
+                        }
+                        _ => {}
+                    }
+                    for key in keys {
+                        let args = [lit(Span::synthetic(), key.into())];
+                        let answer = value_answer(&c, Some(&recv), "t", &args, None, Site::Other);
+                        let expected = eager_value(&c, key);
+                        if expected.is_some() { positive += 1 } else { negative += 1 }
+                        assert_eq!(answer.is_some(), expected.is_some(),
+                            "{key:?}, {default:?}, {environment:?}, {shape}");
+                    }
+                }
+            }
+        }
+        assert!(positive > 0 && negative > 0);
+    }
 }
 
 #[cfg(test)]
 mod phase_cache_tests {
     use super::*;
+
+    thread_local! {
+        /// Calls of `plans` on this thread: what a cache did not answer.
+        pub(super) static PLANS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn computed() -> usize {
+        PLANS_COMPUTED.with(|n| n.get())
+    }
 
     #[test]
     fn nested_phases_do_not_reuse_another_catalogs_answer() {
@@ -1673,6 +1776,35 @@ mod phase_cache_tests {
             assert_eq!(plans_at(&first, &call, false).unwrap(), expected);
             with_plan_cache(|| assert_eq!(plans_at(&second, &call, false).unwrap(), plans(&second, &call, false).unwrap()));
             assert_eq!(plans_at(&first, &call, false).unwrap(), expected);
+        });
+    }
+
+    #[test]
+    fn the_resolves_answer_shares_the_folds_cached_plans() {
+        let catalog = |text: &str| {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.building().insert("label".into(), text.into());
+            c
+        };
+        let first = catalog("first");
+        let call = |locale: Option<&str>| Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: locale.map(|l| Locale::Literal(l.into())) };
+        let (en, fr) = (call(None), call(Some("fr")));
+        let (plans_en, plans_fr) = (plans(&first, &en, false).unwrap(), plans(&first, &fr, false));
+        let refusal = plans_fr.clone().map(|_| ());
+        assert!(refusal.is_err());
+        with_plan_cache(|| {
+            // The answer `plans` gives, the refusal's text included, on the miss and on the hit.
+            assert_eq!(plans_ok_at(&first, &en, false), Ok(()));
+            assert_eq!(plans_ok_at(&first, &fr, false), refusal);
+            assert_eq!(plans_ok_at(&first, &fr, false), refusal);
+            // Kept for the phase: later reads of the same calls, whole plans or not, plan nothing again.
+            let before = computed();
+            assert_eq!(plans_ok_at(&first, &fr, false), refusal);
+            assert_eq!(plans_at(&first, &en, false).unwrap(), plans_en);
+            assert_eq!(plans_at(&first, &fr, false), plans_fr);
+            assert_eq!(computed(), before);
         });
     }
 }
