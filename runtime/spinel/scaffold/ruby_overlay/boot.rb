@@ -137,6 +137,8 @@ require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
 # Replace the portable character walk only after loading the shared policy.
 require_relative "runtime/header_validation_cruby"
+# Header lookups without a downcased copy, the CSP header joined once.
+require_relative "runtime/response_headers_cruby"
 # Signed cookies verified once per value per thread, not per request.
 require_relative "runtime/message_verifier_cruby"
 # `allow_browser`'s verdict once per User-Agent per thread, not per request.
