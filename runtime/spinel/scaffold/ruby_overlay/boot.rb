@@ -218,6 +218,8 @@ require_relative "runtime/action_view_url_for"
 require_relative "runtime/action_view_record_identifier"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
+# Request header names mapped to Rack env keys once per name.
+require_relative "runtime/header_names_cruby"
 require_relative "runtime/action_controller_session"
 require_relative "runtime/action_controller_json_render"
 require_relative "runtime/typed_store"
