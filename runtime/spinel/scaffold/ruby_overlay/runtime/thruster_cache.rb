@@ -82,7 +82,7 @@ module ThrusterCache
 
   def self.call(app, env)
     method = env["REQUEST_METHOD"]
-    header = ->(name) { env["HTTP_#{name.upcase.tr("-", "_")}"] }
+    header = ->(name) { env[rack_header_key(name)] }
     query = env["QUERY_STRING"].to_s
     path = query.empty? ? env["PATH_INFO"].to_s : "#{env["PATH_INFO"]}?#{query}"
     key = lookup_key(method, path, env["HTTP_HOST"].to_s, header)
@@ -105,6 +105,26 @@ module ThrusterCache
     return [status, response_headers, body] if text.nil?
     record(key, header, status, stored, text, now + lifetime)
     [status, response_headers, [text]]
+  end
+
+  # The Rack env key of a request header (`upgrade` -> `HTTP_UPGRADE`),
+  # kept per name: every request asks for the same few (upgrade,
+  # connection, range, the Vary'd ones), and building each key cost an
+  # upcase, a tr and an interpolation per read. A frozen Hash that a miss
+  # replaces whole (a lost race only recomputes), up to RACK_KEYS_CAP
+  # names; only plain UTF-8 String names are kept.
+  RACK_KEYS_CAP = 256
+
+  def self.rack_header_key(name)
+    return "HTTP_#{name.upcase.tr("-", "_")}" unless name.instance_of?(String) && name.encoding == Encoding::UTF_8
+    keys = @rack_keys
+    unless keys.nil?
+      key = keys[name]
+      return key unless key.nil?
+    end
+    key = "HTTP_#{name.upcase.tr("-", "_")}".freeze
+    @rack_keys = (keys.nil? ? {} : keys).merge(name.dup.freeze => key).freeze if keys.nil? || keys.size < RACK_KEYS_CAP
+    key
   end
 
   # The store key for a request Thruster would look up, or nil when it
