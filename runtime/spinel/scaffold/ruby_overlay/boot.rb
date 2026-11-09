@@ -220,6 +220,8 @@ require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
 # Request header names mapped to Rack env keys once per name.
 require_relative "runtime/header_names_cruby"
+# Rack::Static hands a plain path it cannot serve to the app without cleaning it.
+require_relative "runtime/rack_static_cruby"
 require_relative "runtime/action_controller_session"
 require_relative "runtime/action_controller_json_render"
 require_relative "runtime/typed_store"
