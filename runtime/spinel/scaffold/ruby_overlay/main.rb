@@ -573,7 +573,7 @@ module Main
     headers["location"] = location unless location.nil?
     # A nil value is a header the app unset (`X-Rev` outside a deploy
     # with GIT_REVISION) — Rack 3 refuses a nil, so it is not written.
-    extra_headers.each { |k, v| headers[k.to_s.downcase] = v unless v.nil? }
+    extra_headers.each { |k, v| headers[ActionController.rack_header_name(k)] = v unless v.nil? }
     cookies = []
     https = env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https"
     set_cookies.each do |name, val|
