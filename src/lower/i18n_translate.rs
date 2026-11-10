@@ -313,9 +313,21 @@ thread_local! {
 
 // Answers shared only within one immutable-catalog phase and its workers.
 #[derive(Clone, Default)]
-pub(crate) struct SharedPlanCache(std::sync::Arc<std::sync::Mutex<
-    crate::det::HashMap<PlanKey, Result<Vec<(Variant, Plan)>, String>>
->>);
+pub(crate) struct SharedPlanCache(std::sync::Arc<std::sync::Mutex<PhasePlans>>);
+
+/// One catalog's answers. `catalog` is the address of the catalog they were
+/// planned over, taken at the first plan kept: a call planned over any other
+/// catalog is neither answered from here nor kept, so a phase that reaches a
+/// second catalog cannot read the first one's plans.
+#[derive(Default)]
+struct PhasePlans {
+    catalog: Option<usize>,
+    answers: crate::det::HashMap<PlanKey, Result<Vec<(Variant, Plan)>, String>>,
+}
+
+fn address(catalog: &Catalog) -> usize {
+    catalog as *const Catalog as usize
+}
 
 pub(crate) fn plan_cache_snapshot() -> Option<SharedPlanCache> {
     PLANNED.with(|c| c.borrow().clone())
@@ -341,8 +353,9 @@ struct PlanKey {
     in_view: bool,
 }
 
-/// Keep plans for one phase over one immutable catalog. Nested analyses
-/// start a fresh cache: an outer session may analyze another app/catalog.
+/// Keep plans for one phase over one immutable catalog: the first one a
+/// plan is kept for. Nested analyses start a fresh cache: an outer session
+/// may analyze another app/catalog.
 pub fn with_plan_cache<T>(f: impl FnOnce() -> T) -> T {
     let _cache = install_plan_cache(Some(Default::default()));
     f()
@@ -380,14 +393,25 @@ fn planned<T>(
     read: impl Fn(&Result<Vec<(Variant, Plan)>, String>) -> T,
 ) -> T {
     let key = plan_key(call, in_view);
-    if let Some(hit) = PLANNED.with(|c| c.borrow().as_ref().and_then(|m| m.0.lock().unwrap().get(&key).map(&read))) {
+    let here = address(catalog);
+    let hit = PLANNED.with(|c| {
+        c.borrow().as_ref().and_then(|m| {
+            let kept = m.0.lock().unwrap();
+            if kept.catalog == Some(here) { kept.answers.get(&key).map(&read) } else { None }
+        })
+    });
+    if let Some(hit) = hit {
         return hit;
     }
     let out = plans(catalog, call, in_view);
     let answer = read(&out);
     PLANNED.with(|c| {
         if let Some(m) = c.borrow().as_ref() {
-            m.0.lock().unwrap().insert(key, out);
+            let mut kept = m.0.lock().unwrap();
+            // The cache belongs to the first catalog a plan is kept for; another catalog's plan is not kept.
+            if *kept.catalog.get_or_insert(here) == here {
+                kept.answers.insert(key, out);
+            }
         }
     });
     answer
@@ -1758,6 +1782,34 @@ mod phase_cache_tests {
 
     fn computed() -> usize {
         PLANS_COMPUTED.with(|n| n.get())
+    }
+
+    #[test]
+    fn a_cache_answers_only_for_the_catalog_it_was_filled_over() {
+        let catalog = |text: &str| {
+            let mut c = Catalog::default();
+            c.locale = "en".into();
+            c.entries.building().insert("label".into(), text.into());
+            c
+        };
+        let (first, second) = (catalog("first"), catalog("second"));
+        let call = Call { lookup: Translate { key: "label".into(), ..Default::default() },
+            count: None, values: vec![], order: vec![], dynamic: None, locale: None };
+        let (of_first, of_second) = (plans(&first, &call, false).unwrap(), plans(&second, &call, false).unwrap());
+        assert_ne!(of_first, of_second);
+        with_plan_cache(|| {
+            assert_eq!(plans_at(&first, &call, false).unwrap(), of_first);
+            // Another catalog asked in the same phase, with no nested cache, gets its own answer.
+            assert_eq!(plans_at(&second, &call, false).unwrap(), of_second);
+            assert_eq!(plans_ok_at(&second, &call, false), Ok(()));
+            // It left nothing behind: the first catalog still reads its own kept plans, and the second is planned
+            // again each time it asks.
+            let before = computed();
+            assert_eq!(plans_at(&first, &call, false).unwrap(), of_first);
+            assert_eq!(computed(), before);
+            assert_eq!(plans_at(&second, &call, false).unwrap(), of_second);
+            assert_eq!(computed(), before + 1);
+        });
     }
 
     #[test]
