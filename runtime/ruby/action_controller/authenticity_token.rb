@@ -19,7 +19,7 @@ module ActionController
     def self.masked
       raw_b64 = ensure_session_token
       return "" if raw_b64.empty?
-      raw = decode(raw_b64)
+      raw = secret_bytes(raw_b64)
       return "" if raw.length != 32
       pad = MessageDigest.secure_random_bytes(32)
       return "" if pad.length != 32
@@ -65,6 +65,24 @@ module ActionController
       Base64.urlsafe_decode64(encoded)
     rescue ArgumentError
       ""
+    end
+
+    # The session secret's bytes. A page masks one token per form and one
+    # for the csrf meta tag, all from the one secret its session holds:
+    # the last decode is kept in `Thread.current[]` (per fiber on CRuby
+    # and JRuby, per thread on Spinel) and answered again only for the
+    # very String it was decoded from, which a session holds for one
+    # request. Identity, never a comparison of the secrets' bytes:
+    # another session's secret, or the same one parsed from the next
+    # request's cookie, is a different String and is decoded. A session's
+    # secret is replaced by a new String, never changed in place. The
+    # pair stays until the next page's first token replaces it.
+    def self.secret_bytes(encoded)
+      kept = Thread.current[:rh_csrf_secret]
+      return kept[1].to_s if !kept.nil? && encoded.equal?(kept[0])
+      raw = decode(encoded)
+      Thread.current[:rh_csrf_secret] = [encoded, raw]
+      raw
     end
 
     # The XOR of two 32-byte strings (`masked` checks the pad's length,
