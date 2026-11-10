@@ -7,9 +7,10 @@
 # Write-once for every ruby-family target. Strict-target `base.rb`
 # still answers an empty token (no `Current.session`); this file is
 # required from `action_controller.rb`, off those tables, like
-# `current.rb`. Masking is byte XOR — transpilable — and the only
-# primitives below are `MessageDigest.secure_random_bytes`,
-# `hmac_sha256`, and `secure_compare`.
+# `current.rb`, so only the ruby family (CRuby, JRuby, Spinel) compiles
+# it. Masking is byte XOR, and the only primitives below are
+# `MessageDigest.secure_random_bytes`, `hmac_sha256`, and
+# `secure_compare`.
 module ActionController
     module AuthenticityToken
     LENGTH = 32
@@ -66,11 +67,19 @@ module ActionController
       ""
     end
 
+    # The XOR of two 32-byte strings (`masked` checks the pad's length,
+    # `unmask` slices 32), written over a copy of `a`: one string, where
+    # appending a `chr` per byte built 64 and copied the growing one each
+    # time, for every masked token (a page renders one per form and one
+    # for the csrf meta tag). The work does not depend on the bytes. The
+    # copy is binary whatever `a`'s encoding, so `valid?` counts bytes
+    # when it asks the length; a longer `a` would come back longer and
+    # fail `unmask`'s length check, closed.
     def self.xor(a, b)
-      out = ""
+      out = a.b
       i = 0
       while i < 32
-        out = out + (a.getbyte(i) ^ b.getbyte(i)).chr
+        out.setbyte(i, a.getbyte(i) ^ b.getbyte(i))
         i += 1
       end
       out

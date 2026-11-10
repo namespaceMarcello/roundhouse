@@ -145,8 +145,6 @@ require_relative "runtime/response_header_names_cruby"
 require_relative "runtime/message_verifier_cruby"
 # `allow_browser`'s verdict once per User-Agent per thread, not per request.
 require_relative "runtime/browser_blocker_cruby"
-# Masked CSRF tokens XORed with pack/unpack, not 32 `chr`s.
-require_relative "runtime/authenticity_token_cruby"
 # `Hash#to_query`'s nested bracket grammar — a reopen of the shared
 # ViewHelpers' scalar `to_query_value`, so AFTER action_controller's
 # require chain has defined the shared one; the spinel boot's twin line.
