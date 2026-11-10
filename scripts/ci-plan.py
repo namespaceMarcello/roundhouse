@@ -157,6 +157,7 @@ SPINEL_TESTS = [
     "render_object_locals",
     "rails_cache_entry_options_spinel",
     "authenticity_token_xor",
+    "csrf_secret_decoded_once",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
