@@ -11,6 +11,8 @@ use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 /// On the compiled targets, inside an emitted tree: the kept decode answers
 /// the same bytes as a fresh one, for a secret asked twice and for two
@@ -198,7 +200,9 @@ threads.each(&:join)
 raise "FAILED: #{errors.pop}" unless errors.empty?
 puts "ALL OK"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK"), "{stdout}");

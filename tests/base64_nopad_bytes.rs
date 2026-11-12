@@ -9,6 +9,8 @@ use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 const NOPAD_PROBE: &str = r##"
 want = ["", "YQ", "YWI", "YWJj", "YWJjZA", "-_8", "_-7_", "AA"]
@@ -72,7 +74,9 @@ secret = rng.bytes(32)
 end
 puts "ALL OK #{inputs.size}"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK 1046"), "{stdout}");

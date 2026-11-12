@@ -169,14 +169,11 @@ puts "ALL OK"
 "#;
     // YJIT is switched on by the script, with its counters: one already on
     // from the environment would leave them off.
-    let out = Command::new("ruby")
-        .arg("-e")
-        .arg(script)
-        .env_remove("RUBY_YJIT_ENABLE")
-        .env_remove("RUBYOPT")
-        .current_dir(root)
-        .output()
-        .expect("ruby is on PATH");
+    let Some(out) = prerequisite::output_of(
+        Command::new("ruby").arg("-e").arg(script).env_remove("RUBY_YJIT_ENABLE").env_remove("RUBYOPT").current_dir(root),
+    ) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

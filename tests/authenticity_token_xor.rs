@@ -12,6 +12,8 @@ use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 /// The same proof on the compiled targets, inside an emitted tree: the XOR
 /// of pads with a NUL at the first, a middle and the last byte (a copy sized
@@ -117,7 +119,9 @@ per_call = (GC.stat(:total_allocated_objects) - before).fdiv(1000)
 raise "FAILED: xor allocates #{per_call} objects per call, want 1" unless per_call < 1.5
 puts "ALL OK #{pairs.size}"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK 20009"), "{stdout}");
@@ -186,7 +190,9 @@ MessageDigest.define_singleton_method(:secure_compare) { |_a, _b| false }
 raise "FAILED: valid? accepted a token without secure_compare" if at.valid?(tokens.first, secret)
 puts "ALL OK"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK"), "{stdout}");

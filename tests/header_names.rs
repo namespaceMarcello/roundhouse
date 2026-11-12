@@ -9,6 +9,8 @@ use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 #[test]
 fn emitted_ruby_boot_loads_the_header_name_memo() {
@@ -84,7 +86,9 @@ end
 check.("rack cap held", ThrusterCache.instance_variable_get(:@rack_keys).size <= 256)
 puts "ALL OK"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
 }
