@@ -62,13 +62,11 @@ puts "ALL OK #{count}"
 "##;
     // YJIT is switched on by the script, with its counters: one already on
     // from the environment would leave them off.
-    let output = Command::new("ruby")
-        .args(["-e", script])
-        .env_remove("RUBY_YJIT_ENABLE")
-        .env_remove("RUBYOPT")
-        .current_dir(root)
-        .output()
-        .expect("ruby available");
+    let Some(output) = prerequisite::output_of(
+        Command::new("ruby").args(["-e", script]).env_remove("RUBY_YJIT_ENABLE").env_remove("RUBYOPT").current_dir(root),
+    ) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK 102"), "{stdout}");

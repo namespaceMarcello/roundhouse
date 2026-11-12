@@ -7,6 +7,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
+
 #[test]
 fn remembered_db_times_answer_a_first_parse_in_every_zone() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -50,7 +53,9 @@ check.("cap held", Thread.current.thread_variable_get(:rh_db_times).size <= Acti
 check.("after the cap", outcome.call { ActiveSupport.parse_db_time(s) } == fresh.call(s))
 puts "ALL OK"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
 }

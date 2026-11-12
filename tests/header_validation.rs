@@ -1,6 +1,8 @@
 //! The portable predicates and CRuby/JRuby optimization share one HTTP policy.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 #[test]
 fn fast_header_predicates_match_the_portable_policy() {
@@ -105,8 +107,11 @@ raise "odd source accepted" unless outcome.call { ActionDispatch::ContentSecurit
 end
 puts "ALL OK"
 "##;
-    let output = std::process::Command::new("ruby").args(["-e", script])
-        .current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(
+        std::process::Command::new("ruby").args(["-e", script]).current_dir(env!("CARGO_MANIFEST_DIR")),
+    ) else {
+        return;
+    };
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
 }

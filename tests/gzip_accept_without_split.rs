@@ -9,6 +9,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
+
 #[test]
 fn accepts_gzip_matches_the_full_parse_and_skips_it_for_the_common_headers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -65,7 +68,9 @@ end
 end
 puts "ALL OK #{headers.size}"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK 4225"), "{stdout}");

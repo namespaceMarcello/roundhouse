@@ -11,6 +11,8 @@ use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 #[test]
 fn emitted_ruby_writes_default_headers_in_one_pass() {
@@ -160,7 +162,9 @@ check.("remembered keys and names frozen", kept.keys.all?(&:frozen?) && kept.val
 check.("UTF-8 only", kept.keys.all? { |k| k.encoding == Encoding::UTF_8 })
 puts "ALL OK #{states.size} stores"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
 }

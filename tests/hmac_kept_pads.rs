@@ -17,6 +17,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
+
 pub const SCRIPT: &str = r##"
 require "openssl"
 require_relative "runtime/spinel/message_digest_cruby"
@@ -110,7 +113,9 @@ puts "ALL OK #{n} #{RUBY_ENGINE} #{RUBY_VERSION} openssl #{OpenSSL::VERSION}"
 #[test]
 fn hmac_from_kept_pads_answers_as_openssl_hmac() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("ruby").args(["-e", SCRIPT]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", SCRIPT]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK 208"), "{stdout}");
@@ -149,7 +154,9 @@ end
 raise "FAILED: states were kept" unless Thread.current.thread_variable_get(:rh_hmac_pads).nil?
 puts "ALL OK"
 "##;
-    let output = Command::new("ruby").args(["-e", script]).current_dir(root).output().expect("ruby available");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK"), "{stdout}");

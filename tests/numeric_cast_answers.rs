@@ -10,6 +10,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
+
 #[test]
 fn numeric_casts_answer_every_class_as_before_the_reorder() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -61,8 +64,11 @@ end
 puts "ALL OK #{count}"
 "##;
     // TZ is pinned: the decimal cast of a Time reads the year off `Time#to_s`, which is local time.
-    let output =
-        Command::new("ruby").args(["-e", script]).env("TZ", "UTC").current_dir(root).output().expect("ruby available");
+    let Some(output) =
+        prerequisite::output_of(Command::new("ruby").args(["-e", script]).env("TZ", "UTC").current_dir(root))
+    else {
+        return;
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK 135"), "{stdout}");
