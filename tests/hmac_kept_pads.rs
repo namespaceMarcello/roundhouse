@@ -50,7 +50,16 @@ end
 [[e * 10, (e * 10).b], [e * 40, (e * 40).b]].each do |u, b|
   check.("utf-8 and binary twins (#{u.bytesize} bytes)", MessageDigest.hmac_sha256_hex(u, "m") == MessageDigest.hmac_sha256_hex(b, "m"))
 end
+check.("another digest", MessageDigest.send(:keyed_hmac_raw, "SHA512", "key", "m") == OpenSSL::HMAC.digest("SHA512", "key", "m"))
+check.("helpers private", !MessageDigest.respond_to?(:hmac_pads) && !MessageDigest.respond_to?(:keyed_hmac_raw))
+puts "ALL OK #{n} #{RUBY_ENGINE} #{RUBY_VERSION} openssl #{OpenSSL::VERSION}"
 
+# The kept states, where this openssl's digests finish a copied one. Where
+# they do not, every answer above came from `OpenSSL::HMAC` and none is kept.
+unless MessageDigest::HMAC_BY_HAND
+  puts "NO KEPT STATES"
+  exit
+end
 table = ->(name) { Thread.current.thread_variable_get(name)["SHA256"] }
 first_pair = pads.("SHA256", keys[5])
 check.("the states are kept", !first_pair.nil? && pads.("SHA256", keys[5]).equal?(first_pair))
@@ -103,32 +112,12 @@ check.("the once table stays at its cap, the oldest mark out first (#{table.(:rh
 kept = table.(:rh_hmac_pads).keys
 check.("cap held, the oldest states left first (#{kept.size})", kept == (16..79).map { |i| "key-#{i}" })
 check.("after the cap", 3.times.all? { MessageDigest.hmac_sha256_hex("key-3", "m") == OpenSSL::HMAC.hexdigest("SHA256", "key-3", "m") })
-
-check.("another digest", MessageDigest.send(:keyed_hmac_raw, "SHA512", "key", "m") == OpenSSL::HMAC.digest("SHA512", "key", "m"))
-check.("helpers private", !MessageDigest.respond_to?(:hmac_pads) && !MessageDigest.respond_to?(:keyed_hmac_raw))
-check.("by hand on this openssl", MessageDigest::HMAC_BY_HAND)
-puts "ALL OK #{n} #{RUBY_ENGINE} #{RUBY_VERSION} openssl #{OpenSSL::VERSION}"
+puts "KEPT STATES OK"
 "##;
 
-#[test]
-fn hmac_from_kept_pads_answers_as_openssl_hmac() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", SCRIPT]).current_dir(root)) else {
-        return;
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("ALL OK 208"), "{stdout}");
-}
-
-/// `Digest::Instance` gives every digest class a private `finish` that only
-/// raises, so the method's presence says nothing: on an openssl whose digest
-/// does not finish a copied state (here a copy raises, an original
-/// finishes), every HMAC goes through `OpenSSL::HMAC` and no state is kept.
-#[test]
-fn hmac_goes_through_openssl_when_a_digest_cannot_finish_a_copy() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let script = r##"
+/// An openssl whose digest does not finish a copied state: a copy raises,
+/// an original finishes.
+const NO_FINISH_ON_A_COPY: &str = r##"
 require "openssl"
 OpenSSL::Digest.prepend(Module.new do
   def initialize_copy(*)
@@ -144,6 +133,40 @@ end)
 whole = OpenSSL::Digest.new("SHA256")
 whole.update("abc")
 raise "FAILED: the stand-in broke an original digest" unless whole.send(:finish) == OpenSSL::Digest.digest("SHA256", "abc")
+"##;
+
+/// The answers are compared on every openssl. The kept states are read
+/// only where its digests finish a copied one (`HMAC_BY_HAND`): on another
+/// that half is a missing prerequisite, so a run that requires them fails.
+#[test]
+fn hmac_from_kept_pads_answers_as_openssl_hmac() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", SCRIPT]).current_dir(root)) else {
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("ALL OK 208"), "{stdout}");
+    if stdout.contains("NO KEPT STATES") {
+        prerequisite::missing(
+            "an openssl whose digests finish a copied state (MessageDigest::HMAC_BY_HAND): the kept-state half did not run",
+        );
+        return;
+    }
+    assert!(stdout.contains("KEPT STATES OK"), "the kept-state half did not reach its end:\n{stdout}");
+}
+
+/// `Digest::Instance` gives every digest class a private `finish` that only
+/// raises, so the method's presence says nothing: on an openssl whose digest
+/// does not finish a copied state (here a copy raises, an original
+/// finishes), every HMAC goes through `OpenSSL::HMAC` and no state is kept.
+/// The first test's answers hold there too, and its kept-state half stays out.
+#[test]
+fn hmac_goes_through_openssl_when_a_digest_cannot_finish_a_copy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = &format!(
+        "{NO_FINISH_ON_A_COPY}{}",
+        r##"
 require_relative "runtime/spinel/message_digest_cruby"
 raise "FAILED: by hand on a digest that cannot finish" if MessageDigest::HMAC_BY_HAND
 3.times do
@@ -153,11 +176,20 @@ raise "FAILED: by hand on a digest that cannot finish" if MessageDigest::HMAC_BY
 end
 raise "FAILED: states were kept" unless Thread.current.thread_variable_get(:rh_hmac_pads).nil?
 puts "ALL OK"
-"##;
+"##
+    );
     let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
         return;
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert!(stdout.contains("ALL OK"), "{stdout}");
+
+    let answers = &format!("{NO_FINISH_ON_A_COPY}{SCRIPT}");
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", answers]).current_dir(root)) else {
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("ALL OK 208") && stdout.contains("NO KEPT STATES"), "{stdout}");
 }
