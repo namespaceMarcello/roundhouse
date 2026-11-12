@@ -138,6 +138,20 @@ raise "FAILED: the secret was not minted again" if s4 == s1 || s4.empty?
 raise "FAILED: the token after the secret was replaced is not the new secret's" unless at.valid?(renewed, s4) && !at.valid?(renewed, s1)
 one[:_csrf_token] = s1
 
+# The secret's own String changed in place (`replace`): the same object,
+# other bytes. The next tokens are the new bytes' (a decode kept by
+# identity alone would answer the old ones), decoded once for the three.
+three = {}
+cur.session = three
+at.masked
+s5 = secret_of.(three)
+was = s5.dup
+s5.replace(Base64.urlsafe_encode64_nopad(SecureRandom.random_bytes(32)))
+$decodes.clear
+changed = Array.new(3) { at.masked }
+raise "FAILED: a secret changed in place was decoded #{$decodes.values.sum} times for three tokens, want 1" unless $decodes.values.sum == 1
+raise "FAILED: a token after an in-place change is not the new bytes'" unless changed.all? { |t| at.valid?(t, s5) && !at.valid?(t, was) }
+
 # A secret that is not 32 bytes, or not Base64, masks to "" every time.
 [{ _csrf_token: "c2hvcnQ" }, { _csrf_token: "!!!!" }].each do |bad|
   cur.session = bad
@@ -149,6 +163,22 @@ raise "FAILED: a good session after a malformed one" unless at.valid?(at.masked,
 # No session: the empty token, and nothing kept from it.
 cur.session = nil
 raise "FAILED: a token without a session" unless at.masked == ""
+
+# The copy is written over the one kept before: a decode that is kept
+# builds the decode's own objects and the Array of the three, no String.
+x, y = Array.new(2) { Base64.urlsafe_encode64_nopad(SecureRandom.random_bytes(32)) }
+allocated = ->(&work) do
+  1000.times(&work)
+  before = GC.stat(:total_allocated_objects)
+  1000.times(&work)
+  (GC.stat(:total_allocated_objects) - before).fdiv(1000)
+end
+decode = allocated.call { at.decode(x) }
+kept = allocated.call { at.secret_bytes(x); at.secret_bytes(y) }.fdiv(2)
+raise "FAILED: a kept decode allocates #{(kept - decode).round(2)} objects more than the decode, want 1" unless kept - decode < 1.5
+copy = Thread.current[:rh_csrf_secret][2]
+at.secret_bytes(x)
+raise "FAILED: a later decode kept a new String for its copy" unless Thread.current[:rh_csrf_secret][2].equal?(copy) && copy == x
 
 # Two threads at once, each with its session: neither is served the other's secret.
 errors = Queue.new

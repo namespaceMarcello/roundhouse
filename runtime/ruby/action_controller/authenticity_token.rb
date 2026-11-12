@@ -72,16 +72,19 @@ module ActionController
     # the last decode is kept in `Thread.current[]` (per fiber on CRuby
     # and JRuby, per thread on Spinel) and answered again only for the
     # very String it was decoded from, which a session holds for one
-    # request. Identity, never a comparison of the secrets' bytes:
-    # another session's secret, or the same one parsed from the next
-    # request's cookie, is a different String and is decoded. A session's
-    # secret is replaced by a new String, never changed in place. The
-    # pair stays until the next page's first token replaces it.
+    # request. Identity first: another session's secret, or the same one
+    # parsed from the next request's cookie, is a different String and is
+    # decoded, so a secret's bytes are only ever compared with the copy
+    # taken from that same String, never with another session's secret.
+    # A String changed in place (`replace`) differs from its copy and is
+    # decoded again. The three stay until the next page's first token
+    # replaces them; after the slot's first decode the copy is written
+    # over the one kept before, so a decode builds no String for it.
     def self.secret_bytes(encoded)
       kept = Thread.current[:rh_csrf_secret]
-      return kept[1].to_s if !kept.nil? && encoded.equal?(kept[0])
+      return kept[1].to_s if !kept.nil? && encoded.equal?(kept[0]) && encoded == kept[2]
       raw = decode(encoded)
-      Thread.current[:rh_csrf_secret] = [encoded, raw]
+      Thread.current[:rh_csrf_secret] = [encoded, raw, kept.nil? ? encoded.dup : kept[2].replace(encoded)]
       raw
     end
 
