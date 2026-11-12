@@ -18,8 +18,8 @@
 #   `@_request`; not through `headers`, which an app controller may define
 #   for itself. A store of another class (or none) takes the shared method.
 # - Each header name downcased for Rack once per name. Main.rack_response
-#   keys Rack's headers by `k.to_s.downcase`: a new String per header per
-#   response, which `Hash#[]=` then looks up in the interned-string table
+#   keyed Rack's headers by `k.to_s.downcase`: a new String per header per
+#   response, which `Hash#[]=` then looked up in the interned-string table
 #   (0.8% of a page in the profile, that one line). The answer depends on
 #   the name only, so it is kept, per name, in a frozen Hash that a miss
 #   replaces whole (a lost race only recomputes), up to RACK_NAMES_CAP names.
