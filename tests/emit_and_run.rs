@@ -3998,7 +3998,7 @@ puts "public files contract passed"
 }
 
 /// With the page cache on, an app that writes no page (nothing it emits
-/// sends `cache_page`) does not stat for a path its boot listing lacks: a
+/// names `cache_page`) does not stat for a path its boot listing lacks: a
 /// file that appears under public/ after the first request is not served.
 /// An app that writes pages still finds one on disk
 /// (`page_caching::the_static_lookup_decodes_the_path_and_finds_another_workers_page`).
@@ -4025,20 +4025,57 @@ puts "no page writes contract passed"
         .assert_passes();
 }
 
-/// A gem compiled with the app has its files' own statements emitted, and
-/// they run at boot: a `cache_page` sent from one keeps the disk watched,
-/// as one sent from the app's classes does. The same gem without that send
-/// leaves the app with no page writer, and boot.rb says so. The statement
-/// is a conditional one: a plain call on a class the tree carries also
-/// joins the boot program (`gem_load_program`), which the scan already read.
+/// boot.rb's line is decided from the Ruby each tree emits, once the app's
+/// own is in it: an app class that names `cache_page`, through the macro or
+/// through `send`, leaves the Ruby tree and the Spinel tree without it,
+/// and the app as generated has it in both, also when files that are not
+/// Ruby (a public file, a script) name it.
+#[test]
+fn an_app_class_that_names_cache_page_keeps_public_watched_in_both_trees() {
+    use roundhouse::project::BuildTarget;
+    const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+    let boot = |filter: Option<&str>, target: BuildTarget| {
+        let app = emit_and_run::real_blog();
+        let app = match filter {
+            None => app.write("public/cache_page.txt", "cache_page\n").write("app/javascript/cache_page.js", "// cache_page\n"),
+            Some(filter) => app
+                .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/sites/:id\" => \"sites#show\"\n")
+                .write(
+                    "app/controllers/sites_controller.rb",
+                    &format!("class SitesController < ApplicationController\n  {filter}\n\n  def show\n    render html: \"<p>site</p>\".html_safe\n  end\nend\n"),
+                ),
+        };
+        let (emitted, errors) = app.emit(target);
+        assert!(errors.is_empty(), "{filter:?}: {errors:?}");
+        let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+        assert!(boot.contains("require_relative \"runtime/public_files\""), "the tree serves public/:\n{boot}");
+        boot
+    };
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let plain = boot(None, target);
+        assert!(plain.contains(LINE), "{target:?}: an app that names no cache_page writes no page:\n{plain}");
+        for filter in ["caches_page :show", "after_action { send(:cache_page) }"] {
+            let writer = boot(Some(filter), target);
+            assert!(!writer.contains(LINE), "{target:?}: `{filter}` names cache_page, so the disk stays watched:\n{writer}");
+        }
+    }
+}
+
+/// A gem compiled with the app has its files' own programs emitted, and
+/// they run at boot: a `cache_page` sent from a statement of one, or from
+/// the condition of a file-level `if` that holds a declaration, keeps the
+/// disk watched, as one sent from the app's classes does. The same gem
+/// without that send leaves the app with no page writer, and boot.rb says
+/// so. The statement is a conditional one: a plain call on a class the
+/// tree carries also joins the boot program (`gem_load_program`), which
+/// is written with the app's classes.
 #[test]
 fn a_gem_file_statement_that_sends_cache_page_keeps_public_watched() {
     const LOCK: &str = "PATH\n  remote: vendor/gems/tessera-1.0.0\n  specs:\n    tessera (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  tessera!\n";
     const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
-    let emitted = |sent: &str| {
-        let gem = format!(
-            "module Tessera\n  def self.pages(&block)\n    @pages = block\n  end\n\n  def self.pages?\n    !@pages.nil?\n  end\nend\n\nTessera.pages {{ |controller| controller.{sent} }} unless Tessera.pages?\n"
-        );
+    const MODULE: &str = "module Tessera\n  def self.pages(&block)\n    @pages = block\n    true\n  end\n\n  def self.pages?\n    !@pages.nil?\n  end\nend\n\n";
+    let emitted = |tail: &str, written: &str| {
+        let gem = format!("{MODULE}{tail}\n");
         let run = emit_and_run::empty_app()
             .write("roundhouse.yml", "")
             .write("Gemfile.lock", LOCK)
@@ -4049,14 +4086,21 @@ fn a_gem_file_statement_that_sends_cache_page_keeps_public_watched() {
         assert_eq!(run.stdout.trim(), "true", "the gem file's statement ran at boot\n{}", run.stderr);
         let program = run.emitted.join("app/models/roundhouse_files/vendor/gems/tessera-1.0.0/lib/tessera.rb");
         let program = std::fs::read_to_string(&program).unwrap_or_else(|e| panic!("{}: {e}", program.display()));
-        assert!(program.contains(sent), "the statement is emitted in the file's program:\n{program}");
-        std::fs::read_to_string(run.emitted.join("boot.rb")).unwrap()
+        assert!(program.contains(written), "the file's program writes `{written}`:\n{program}");
+        // The line is only ever written after this require: without it no variant says anything.
+        let boot = std::fs::read_to_string(run.emitted.join("boot.rb")).unwrap();
+        assert!(boot.contains("require_relative \"runtime/public_files\""), "the tree serves public/:\n{boot}");
+        boot
     };
-    let quiet = emitted("to_s");
-    assert!(quiet.contains("require_relative \"runtime/public_files\""), "the tree serves public/:\n{quiet}");
+    let quiet = emitted("Tessera.pages { |controller| controller.to_s } unless Tessera.pages?", "to_s");
     assert!(quiet.contains(LINE), "a gem that sends no cache_page leaves the app with no page writer:\n{quiet}");
-    let writer = emitted("cache_page");
-    assert!(!writer.contains(LINE), "a gem file's statement sends cache_page, so the disk stays watched:\n{writer}");
+    let statement = emitted("Tessera.pages { |controller| controller.cache_page } unless Tessera.pages?", "cache_page");
+    assert!(!statement.contains(LINE), "a gem file's statement sends cache_page, so the disk stays watched:\n{statement}");
+    let condition = emitted(
+        "if Tessera.pages { |controller| controller.cache_page }\n  module Tessera\n    module Paged\n    end\n  end\nend",
+        "cache_page",
+    );
+    assert!(!condition.contains(LINE), "the condition of a gem file's `if` sends cache_page, so the disk stays watched:\n{condition}");
 }
 
 #[test]

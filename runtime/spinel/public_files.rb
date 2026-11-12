@@ -15,7 +15,7 @@
 # looks at the disk, which is how a page another worker cached is found.
 #
 # The page cache writes only through `cache_page` (`caches_page` expands to
-# it). When nothing the app emits calls it, boot.rb says so
+# it). When nothing the app emits names it, boot.rb says so
 # (`no_page_writes!`, src/project.rs), no page can appear under public/
 # while the app runs, and a miss stats nothing even with the page cache on:
 # three `File.file?` per GET that is not a public file, 1-2% of a campfire

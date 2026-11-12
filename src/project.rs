@@ -1944,36 +1944,21 @@ fn inject_array_column_require(files: &mut [(String, String)], app: &App) -> Res
 }
 
 /// `boot.rb` tells `PublicFiles` that no page is written while the app
-/// runs (`no_page_writes!`) when nothing it emits sends `cache_page`, the
-/// page cache's one writer (`caches_page` expands to it). A request that
-/// is not a public file then stats nothing, even in production with the
-/// page cache on. An app method that happens to be named `cache_page`
-/// keeps the disk watched, and so does a `cache_page` a compiled gem
-/// file sends as it loads. The ruby overlay's boot replaces Spinel's, so
-/// both trees call this.
-fn inject_no_page_writes(files: &mut [(String, String)], app: &App) {
-    fn sends_cache_page(expr: &crate::expr::Expr) -> bool {
-        if let crate::expr::ExprNode::Send { method, .. } = &*expr.node
-            && method.as_str() == "cache_page"
-        {
-            return true;
-        }
-        let mut found = false;
-        expr.node.for_each_child(&mut |child| found = found || sends_cache_page(child));
-        found
-    }
-    let mut writes = false;
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| writes = writes || sends_cache_page(expr));
-    // A compiled gem file's own statements are emitted too
-    // (`apply_file_programs`), and are not among those bodies.
-    for program in &app.file_programs {
-        for item in all_program_items(&program.items) {
-            if let crate::app::ProgramItem::Statement(statement) = item {
-                writes = writes || sends_cache_page(statement);
-            }
-        }
-    }
-    if writes {
+/// runs (`no_page_writes!`) when no Ruby file of the tree outside
+/// `runtime/` names `cache_page`, the page cache's one writer
+/// (`caches_page` expands to it). A request that is not a public file
+/// then stats nothing, even in production with the page cache on. The
+/// emitted text is what is read, so the app's Ruby counts wherever it was
+/// lowered from: an app class, a compiled gem file's own program (a
+/// statement, the condition of an `if`), a `send(:cache_page)`; an app
+/// method that happens to be named `cache_page` keeps the disk watched
+/// too. Each chain calls this once the app's own Ruby is in the tree
+/// (its classes, its views, the gem files' programs). Not read: what
+/// `runtime/` holds of the app (the gems' middleware blocks) and the
+/// settings a gem package gets in boot.rb afterwards. The ruby overlay's
+/// boot replaces Spinel's, so both trees call this.
+fn inject_no_page_writes(files: &mut [(String, String)]) {
+    if files.iter().any(|(p, c)| p.ends_with(".rb") && !p.starts_with("runtime/") && c.contains("cache_page")) {
         return;
     }
     // A tree whose boot does not load public_files serves no public/ from it:
@@ -5662,7 +5647,6 @@ fn ruby_family_runtime_files(
         inject_cruby_date_calendar_boot_requires(&mut files)?;
     }
     inject_array_column_require(&mut files, app)?;
-    inject_no_page_writes(&mut files, app);
     // Re-apply after the gem_facades rewrite above: the CRuby/JRuby
     // content replaces the spinel-tree file that `apply_pay_demand`
     // already annotated in `spinel_files`.
@@ -5678,6 +5662,8 @@ fn ruby_family_runtime_files(
     if flavor == RubyFlavor::CRuby {
         apply_digest_gem(&mut files);
     }
+    // Reads the tree's Ruby as well, the gem files' programs included.
+    inject_no_page_writes(&mut files);
     drop_solid_queue_standin(app, &mut files);
     Ok(files)
 }
@@ -10509,7 +10495,6 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         files.retain(|(p, _)| p != "runtime/array_column.rb" && p != "runtime/array_column.rbs");
     }
     inject_array_column_require(&mut files, app)?;
-    inject_no_page_writes(&mut files, app);
 
     // ActiveJob payload codecs. Same reason as the JSON-column sidecar:
     // the readers take parsed JSON, which only the sidecar can type.
@@ -11150,6 +11135,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_pay_demand(&mut files, app)?;
     // Not a program's anchor: this tree writes no gem file programs.
     rewrite_carried_requires(&mut files, app, |_| None);
+    // Reads the tree's Ruby, so after the app's files are in it.
+    inject_no_page_writes(&mut files);
     drop_solid_queue_standin(app, &mut files);
     Ok((files, test_stems))
 }
