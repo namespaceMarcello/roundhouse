@@ -62,15 +62,17 @@ names = ["Accept-Encoding", "accept-encoding", "ACCEPT-ENCODING", "HTTP_ACCEPT",
     check.("fetch default(#{n.inspect})", outcome.call { h.fetch(n, :d) } == outcome.call { env.fetch(shared.call(n), :d) })
   end
 end
+# A name the caller mutates after asking does not change what is kept:
+# asked while there is room, so the name is kept when it is mutated.
+m = +"Accept"
+check.("before mutation", H.env_name(m) == "HTTP_ACCEPT")
+check.("Accept is kept", H.instance_variable_get(:@rh_env_names).key?("Accept"))
+m << "-Language"
+check.("mutated name", H.env_name(m) == shared.call(m))
+check.("kept name intact", H.env_name("Accept") == "HTTP_ACCEPT" && H.instance_variable_get(:@rh_env_names)["Accept"] == "HTTP_ACCEPT")
 # Past the cap: names keep answering right whether or not they are kept.
 300.times { |i| n = "X-Name-#{i}"; check.("cap #{n}", H.env_name(n) == shared.call(n)) }
 check.("cap held", H.instance_variable_get(:@rh_env_names).size <= 256)
-# A name the caller mutates after asking does not change what is kept.
-m = +"Accept"
-check.("before mutation", H.env_name(m) == "HTTP_ACCEPT")
-m << "-Language"
-check.("mutated name", H.env_name(m) == shared.call(m))
-check.("kept name intact", H.env_name("Accept") == "HTTP_ACCEPT")
 check.("kept answers frozen", H.instance_variable_get(:@rh_env_names).all? { |k, v| k.frozen? && v.frozen? })
 
 # ThrusterCache's per-name Rack key against the formula it replaced.
