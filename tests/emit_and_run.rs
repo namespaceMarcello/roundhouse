@@ -3998,9 +3998,12 @@ puts "public files contract passed"
 }
 
 /// With the page cache on, an app that writes no page (nothing it emits
-/// names `cache_page`) does not stat for a path its boot listing lacks: a
-/// file that appears under public/ after the first request is not served.
-/// An app that writes pages still finds one on disk
+/// names `cache_page`) still finds on disk a file written under public/
+/// after the first request at its own path, as Rails' FileHandler does (an
+/// upload stored there), but does not stat the names only the page cache
+/// gives a path (`/later` as `later.html`). With the page cache off a miss
+/// looks at nothing on disk, as before. An app that writes pages still
+/// finds one on disk
 /// (`page_caching::the_static_lookup_decodes_the_path_and_finds_another_workers_page`).
 #[test]
 fn an_app_that_writes_no_page_does_not_watch_public_on_disk() {
@@ -4016,10 +4019,29 @@ builder.instance_eval(File.read("config.ru"), "config.ru")
 client = Rack::MockRequest.new(builder.to_app)
 check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
 ActionController::Base.perform_caching = true
-check.(client.get("/late.html").status == 404, "no public file before it is written")
-File.write("public/late.html", "late\n")
-r = client.get("/late.html")
-check.(r.status == 404 && r.body != "late\n", "a file written after boot is not looked up: #{r.status}")
+check.(client.get("/late.txt").status == 404, "no public file before it is written")
+File.write("public/late.txt", "late\n")
+r = client.get("/late.txt")
+check.(r.status == 200 && r.body == "late\n", "a file written at its own path after boot is served: #{r.status}")
+check.(client.get("/later").status == 404, "no page before it is written")
+File.write("public/later.html", "later\n")
+r = client.get("/later")
+check.(r.status == 404 && r.body != "later\n", "a page cache name written after boot is not looked up: #{r.status}")
+r = client.get("/later.html")
+check.(r.status == 200 && r.body == "later\n", "the same file at its own path is served: #{r.status}")
+r = client.get("/later")
+check.(r.status == 200 && r.body == "later\n", "once found at its own path, the page answers its page name in this process: #{r.status}")
+Dir.mkdir("public/inner")
+File.write("public/inner/index.html", "inner\n")
+r = client.get("/inner")
+check.(r.status == 404 && r.body != "inner\n", "a page cache index written after boot is not looked up: #{r.status}")
+r = client.get("/inner/index.html")
+check.(r.status == 200 && r.body == "inner\n", "the index at its own path is served: #{r.status}")
+ActionController::Base.perform_caching = false
+ActionController::PublicFiles.reset_watch!
+File.write("public/off.txt", "off\n")
+r = client.get("/off.txt")
+check.(r.status == 404 && r.body != "off\n", "with the page cache off a file written after boot is not looked up: #{r.status}")
 puts "no page writes contract passed"
 "##)
         .assert_passes();
