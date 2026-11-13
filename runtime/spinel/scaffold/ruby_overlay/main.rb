@@ -581,7 +581,9 @@ module Main
     # with GIT_REVISION) — Rack 3 refuses a nil, so it is not written.
     extra_headers.each { |k, v| headers[ActionController.rack_header_name(k)] = v unless v.nil? }
     cookies = []
-    https = env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https"
+    # Read only for a response that sets a cookie: here the scheme decides a cookie's Secure flag and nothing else.
+    https = !set_cookies.empty? &&
+      (env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https")
     set_cookies.each do |name, val|
       cookies << if val.nil?
         "#{name}=; Path=/; Max-Age=0"

@@ -4286,6 +4286,59 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct clock contract passed"));
 }
 
+/// A cookie the response sets carries `Secure` when the request came over
+/// https (`HTTPS`, or the first `X-Forwarded-Proto`), and that is all the
+/// Rack response reads the scheme for: a response that sets no cookie does
+/// not ask the env for it.
+#[test]
+fn the_rack_response_reads_the_scheme_only_to_flag_a_cookie() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+asked = Hash.new(0)
+spy = Class.new(Hash) {
+  define_method(:[]) { |key| asked[key] += 1 if key == "HTTPS"; super(key) }
+  define_method(:fetch) { |key, *rest, &blk| asked[key] += 1 if key == "HTTP_X_FORWARDED_PROTO"; super(key, *rest, &blk) }
+}
+env_of = ->(pairs) { spy.new.merge!({ "REQUEST_METHOD" => "GET" }).merge!(pairs) }
+answer = ->(cookies, secure = {}, samesite = {}) { [200, "body", "text/html; charset=utf-8", nil, cookies, { "X-Test" => "1" }, secure, samesite, {}, {}] }
+
+# No cookie to set: the answer is the same response, and the scheme is not read.
+status, headers, body = Main.rack_response(env_of.({ "HTTP_X_FORWARDED_PROTO" => "https" }), answer.({}))
+check.(status == 200 && body == ["body"] && headers["x-test"] == "1" && headers["content-type"] == "text/html; charset=utf-8", "the response is #{[status, headers, body].inspect}")
+check.(!headers.key?("set-cookie"), "no cookie is set: #{headers.inspect}")
+check.(asked.empty?, "a response that sets no cookie asked the env for #{asked.keys.inspect}")
+
+# A cookie to set: Secure exactly when the request is https, as before.
+line = ->(pairs, *flags) { Main.rack_response(env_of.(pairs), answer.({ "k" => "v" }, *flags))[1]["set-cookie"] }
+plain = ["k=v; Path=/; HttpOnly; SameSite=Lax"]
+secure = ["k=v; Path=/; HttpOnly; SameSite=Lax; Secure"]
+{ {} => plain, { "HTTPS" => "on" } => secure, { "HTTPS" => "off" } => plain, { "HTTPS" => "ON" } => plain,
+  { "HTTP_X_FORWARDED_PROTO" => "https" } => secure, { "HTTP_X_FORWARDED_PROTO" => "HTTPS, http" } => secure,
+  { "HTTP_X_FORWARDED_PROTO" => " https ,http" } => secure, { "HTTP_X_FORWARDED_PROTO" => "http, https" } => plain,
+  { "HTTP_X_FORWARDED_PROTO" => "" } => plain, { "HTTP_X_FORWARDED_PROTO" => "http" } => plain,
+  { "HTTPS" => "on", "HTTP_X_FORWARDED_PROTO" => "http" } => secure }.each do |pairs, want|
+  asked.clear
+  check.(line.(pairs) == want, "#{pairs.inspect} sets #{line.(pairs).inspect}, want #{want.inspect}")
+  check.(asked["HTTPS"] > 0, "#{pairs.inspect}: a response that sets a cookie reads the scheme")
+end
+# The flags that do not depend on the scheme still hold without it.
+check.(line.({}, { "k" => true }) == secure, "a cookie the app flagged secure: #{line.({}, { "k" => true }).inspect}")
+check.(line.({}, {}, { "k" => "None" }) == ["k=v; Path=/; HttpOnly; SameSite=None; Secure"], "SameSite=None is Secure: #{line.({}, {}, { "k" => "None" }).inspect}")
+cleared = Main.rack_response(env_of.({ "HTTPS" => "on" }), answer.({ "gone" => nil }))[1]["set-cookie"]
+check.(cleared == ["gone=; Path=/; Max-Age=0"], "a cleared cookie: #{cleared.inspect}")
+puts "cookie scheme contract passed"
+"##)
+        .assert_passes();
+}
+
 /// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails
 /// app writes): generate as `JSON.generate` (`<>&` raw, `Infinity` and
 /// `NaN` a `JSON::GeneratorError`), load as
