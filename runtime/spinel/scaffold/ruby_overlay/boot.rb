@@ -137,6 +137,8 @@ require_relative "runtime/action_dispatch"
 # A path or capture with nothing to decode copied in one step.
 require_relative "runtime/router_decode_cruby"
 require_relative "runtime/action_controller"
+# A URL's host found with String#index, not a substring per position.
+require_relative "runtime/substring_search_cruby"
 # Replace the portable character walk only after loading the shared policy.
 require_relative "runtime/header_validation_cruby"
 # Header lookups without a downcased copy, the CSP header joined once.
