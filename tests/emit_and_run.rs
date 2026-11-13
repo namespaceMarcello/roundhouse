@@ -4103,6 +4103,45 @@ fn a_gem_file_statement_that_sends_cache_page_keeps_public_watched() {
     assert!(!condition.contains(LINE), "the condition of a gem file's `if` sends cache_page, so the disk stays watched:\n{condition}");
 }
 
+/// The app's Ruby that each chain writes under `runtime/` counts, in both
+/// trees: a `cache_page` sent from the block the app hands its middleware
+/// (`runtime/gem_middleware.rb`), from an SQL function an initializer
+/// registers (`runtime/sql_functions.rb`) or from a rake file's
+/// DatabaseTasks hook (`runtime/active_record/app_rake_tasks.rb`) leaves
+/// boot.rb without `no_page_writes!`, so the file is written before the
+/// tree is read.
+#[test]
+fn the_apps_ruby_under_runtime_keeps_public_watched_in_both_trees() {
+    use roundhouse::project::BuildTarget;
+    const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+    const AUTOLOAD: &str = "    config.autoload_lib(ignore: %w[assets tasks])\n";
+    const PROBE: &str = "class ProbeUse\n  def initialize(app, &block)\n    @app = app\n  end\n\n  def call(env)\n    @app.call(env)\n  end\nend\n";
+    const FUNCTION: &str = "require \"active_record/connection_adapters/sqlite3_adapter\"\n\nActiveSupport.on_load(:active_record) do\n  ActiveRecord::ConnectionAdapters::SQLite3Adapter.class_eval do\n    alias_method :orig_initialize, :initialize\n\n    def initialize(connection, logger = nil, pool = nil)\n      orig_initialize(connection, logger, pool)\n\n      raw_connection.create_function(\"paged\", 0) do |fn|\n        fn.result = cache_page\n      end\n    end\n  end\nend\n";
+    const TASKS: &str = "module PagedDatabaseTasks\n  def migrate(...)\n    super.tap { warm_pages }\n  end\n\n  def warm_pages\n    cache_page\n  end\nend\n\nActiveRecord::Tasks::DatabaseTasks.singleton_class.prepend(PagedDatabaseTasks)\n\nnamespace :pages do\n  task warm: :environment do\n    ActiveRecord::Tasks::DatabaseTasks.warm_pages\n  end\nend\n";
+    let middleware = || {
+        emit_and_run::real_blog()
+            .write("lib/probe_use.rb", PROBE)
+            .edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}    config.middleware.use ProbeUse do |probe|\n      probe.cache_page\n    end\n"))
+    };
+    let function = || emit_and_run::real_blog().write("config/initializers/sqlite_functions.rb", FUNCTION);
+    let tasks = || emit_and_run::real_blog().write("lib/tasks/paged.rake", TASKS);
+    let cases: [(&str, &dyn Fn() -> emit_and_run::Overlay); 3] = [
+        ("runtime/gem_middleware.rb", &middleware),
+        ("runtime/sql_functions.rb", &function),
+        ("runtime/active_record/app_rake_tasks.rb", &tasks),
+    ];
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        for (file, app) in &cases {
+            let (emitted, _errors) = app().emit(target);
+            let carried = std::fs::read_to_string(emitted.join(file)).unwrap_or_else(|e| panic!("{target:?} {file}: {e}"));
+            assert!(carried.contains("cache_page"), "{target:?}: the app's send is in {file}:\n{carried}");
+            let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+            assert!(boot.contains("require_relative \"runtime/public_files\""), "{target:?}: the tree serves public/:\n{boot}");
+            assert!(!boot.contains(LINE), "{target:?}: {file} sends cache_page, so the disk stays watched:\n{boot}");
+        }
+    }
+}
+
 #[test]
 fn class_configuration_shares_a_name_with_an_instance_method() {
     let run = class_configuration::same_name_overlay().run_ruby(class_configuration::SAME_NAME_ASSERTIONS);
