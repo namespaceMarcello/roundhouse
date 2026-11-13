@@ -400,13 +400,15 @@ module Main
     # logout with no token re-added) clears the cookie.
     # `request.session_options[:skip] = true` leaves it alone — see
     # the spinel main.
-    session_out = controller.session.to_cookie
-    if !host_session.nil?
-      env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
-    # Not here under `run_rack`: Rails commits above the gems' middleware (`Main.commit_session`).
-    elsif session_out != session_in && !controller.request.session_skip? && !env["roundhouse.session.above"]
-      out_cookies[session_cookie] =
-        session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
+    # Not here under `run_rack`, and not encoded for it: Rails commits above the gems' middleware (`Main.commit_session`), which encodes the session it finds there.
+    if !host_session.nil? || !env["roundhouse.session.above"]
+      session_out = controller.session.to_cookie
+      if !host_session.nil?
+        env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
+      elsif session_out != session_in && !controller.request.session_skip?
+        out_cookies[session_cookie] =
+          session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
+      end
     end
     is_redirect = controller.status >= 300 && controller.status < 400 && !controller.head_response?
     # Compose `Cache-Control` from whatever `response.cache_control`

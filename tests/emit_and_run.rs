@@ -4149,6 +4149,66 @@ fn class_configuration_shares_a_name_with_an_instance_method() {
     assert!(run.stdout.contains("class and instance configuration names passed"));
 }
 
+/// Under the Rack stack the session is committed above the gems'
+/// middleware (`Main.commit_session`), so the dispatch below it has
+/// nothing to encode: a request encodes its session when it is restored
+/// and when it is committed, twice, and sets the cookie it set before: on
+/// a first visit that mints a CSRF token, and not when the browser sends
+/// the session back unchanged. The CGI entry, with no commit above it,
+/// still encodes after the action and sets the cookie itself.
+#[test]
+fn a_request_through_the_rack_stack_encodes_its_session_twice() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+encoded = 0
+ActionDispatch::Session.prepend(Module.new { define_method(:to_cookie) { encoded += 1; super() } })
+name = Rails.application.session_cookie_key
+session_cookie = lambda do |response|
+  Array(response.headers["set-cookie"]).flat_map { |line| line.split("\n") }.find { |line| line.start_with?("#{name}=") }
+end
+
+# A first visit to a page with a form: the session gains a CSRF token and is set.
+first = client.get("/articles/new")
+check.(first.status == 200, "GET /articles/new answers #{first.status}")
+set = session_cookie.(first)
+check.(!set.nil? && set.include?("HttpOnly"), "a first visit sets the session cookie: #{first.headers["set-cookie"].inspect}")
+check.(encoded == 2, "a first visit encodes the session #{encoded} times, want 2 (restored, committed)")
+
+# The browser sends it back: nothing changes, nothing is set.
+encoded = 0
+again = client.get("/articles/new", "HTTP_COOKIE" => set.split(";").first)
+check.(again.status == 200, "the second GET answers #{again.status}")
+check.(session_cookie.(again).nil?, "an unchanged session is not set again: #{again.headers["set-cookie"].inspect}")
+check.(encoded == 2, "an unchanged session is encoded #{encoded} times, want 2")
+
+# A response that does not touch the session, with no cookie: none is set.
+encoded = 0
+missing = client.get("/no-such-page")
+check.(missing.status == 404 && session_cookie.(missing).nil?, "a 404 sets no session: #{missing.status} #{missing.headers["set-cookie"].inspect}")
+check.(encoded == 2, "a 404 encodes the session #{encoded} times, want 2")
+
+# The CGI entry has no commit above it: there the dispatch still encodes
+# the session after the action and sets the cookie itself.
+encoded = 0
+out = StringIO.new
+Main.run({ "REQUEST_METHOD" => "GET", "PATH_INFO" => "/articles/new", "QUERY_STRING" => "" }, StringIO.new(""), out)
+check.(out.string.start_with?("Status: 200"), "the CGI entry answers #{out.string[0, 60].inspect}")
+check.(out.string.include?("Set-Cookie: #{name}="), "the CGI entry sets the session cookie: #{out.string[0, 400].inspect}")
+check.(encoded == 2, "the CGI entry encodes the session #{encoded} times, want 2 (restored, after the action)")
+puts "session encodings contract passed"
+"##)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
