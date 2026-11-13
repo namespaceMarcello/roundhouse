@@ -156,10 +156,14 @@ module Main
     # composes them here so Router.match stays a flat-table walk.
     # What a request constraint asks before its route is chosen (`RouteTable.match_asking`).
     asked = ActionDispatch::Request.new(env.to_h, request[:params])
-    last_segment = request_path.split("/").last.to_s
+    # The extension of the path's last segment, "" when it has none: a path with no dot is not split to look for one.
+    extension = ""
+    if request_path.include?(".")
+      last_segment = request_path.split("/").last.to_s
+      extension = last_segment.split(".").last.to_s if last_segment.include?(".")
+    end
     asked.format = ActionDispatch::MimeNegotiation.format_name(
-      last_segment.include?(".") ? last_segment.split(".").last.to_s : "",
-      env["HTTP_ACCEPT"].to_s, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s
+      extension, env["HTTP_ACCEPT"].to_s, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s
     )
     matched = if endpoint.nil?
       RouteTable.match_asking(request[:method], request_path, route_table, asked)
