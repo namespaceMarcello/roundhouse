@@ -172,9 +172,19 @@ module ThrusterCache
     seconds > 0 ? seconds : nil
   end
 
+  # A header by its lowercase name, or by its capitalized one (`Cache-Control`)
+  # when the app wrote it so. Every response the cache sees is asked for
+  # `vary`, which most do not have, so the capitalized spelling of the
+  # names asked on every response is written once, not per response.
   def self.header(headers, name)
-    headers[name] || headers[name.split("-").map(&:capitalize).join("-")]
+    headers[name] || headers[CAPITALIZED[name] || capitalized(name)]
   end
+
+  def self.capitalized(name)
+    name.split("-").map(&:capitalize).join("-")
+  end
+
+  CAPITALIZED = ["vary", "cache-control"].to_h { |name| [name, capitalized(name).freeze] }.freeze
 
   # The whole body, or nil when it is known too large to store: an Array
   # (still servable as it is) or a file it never opened. An iterated body
