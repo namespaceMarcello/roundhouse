@@ -11,6 +11,11 @@
 //! them and builds (the runs are in `array_fetch_runs`,
 //! `array_batches_typing`, `container_index_constructor`,
 //! `include_query_receivers` and `rational_literal`).
+//!
+//! `<=>` is refused the same way, call and definition, on the targets whose
+//! emit writes the Ruby operator as it is (Crystal's own `<=>` answers an
+//! Int32 where the emit declares Integer as Int64). TypeScript renders the
+//! numeric comparison, so it is not refused there.
 
 #[path = "support/scratch.rs"]
 mod scratch;
@@ -151,5 +156,100 @@ fn an_app_method_named_integer_is_not_refused_as_kernel_s() {
     }
     let (_ok, text) = build(&root, "rust");
     assert!(!text.contains("Kernel#Integer not supported"), "{text}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+const SPACESHIP: &str = r#"class Article < ApplicationRecord
+  def <=>(other)
+    id <=> other.id
+  end
+
+  #: (Integer, Integer) -> Integer
+  def self.order(a, b)
+    a <=> b
+  end
+
+  #: (Integer, Integer) -> Integer
+  def self.reversed(a, b)
+    (a <=> b) * -1
+  end
+
+  #: (Float, Float) -> Integer?
+  def self.floats(a, b)
+    a <=> b
+  end
+
+  #: (Symbol, Symbol) -> Integer
+  def self.symbols(a, b)
+    a <=> b
+  end
+
+  #: (Article, Article) -> Integer?
+  def self.records(a, b)
+    a <=> b
+  end
+
+  #: (Array[Integer]) -> Array[Integer]
+  def self.sorted(xs)
+    xs.sort { |x, y| x <=> y }
+  end
+
+  #: (Array[Integer]) -> Array[Integer]
+  def self.sorted_after_a_step(xs)
+    xs.sort do |x, y|
+      _gap = x.to_s
+      x <=> y
+    end
+  end
+
+  #: (String, String) -> Integer
+  def self.strings(a, b)
+    a <=> b
+  end
+end
+"#;
+
+/// `<=>` refusals a target reports, by its own message: (calls, definitions).
+fn spaceship_refusals(text: &str, target: &str) -> (usize, usize) {
+    (
+        text.matches(&format!("error[unsupported]: <=> not supported ({target})")).count(),
+        text.matches(&format!("error[unsupported]: def <=> not supported ({target})")).count(),
+    )
+}
+
+#[test]
+fn the_comparison_operator_is_refused_where_the_emit_writes_it_as_it_is() {
+    let root = scratch::dir("rh_ruby_only_sends_spaceship");
+    for (path, text) in [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", SPACESHIP),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+    // Nine calls (Integer, reversed Integer, Float, Symbol, Article, the two sort blocks, String, and the one
+    // inside `def <=>`) and the definition.
+    for target in ["elixir", "go", "kotlin", "python", "rust", "swift", "csharp"] {
+        let (ok, text) = build(&root, target);
+        assert!(!ok, "{target}: {text}");
+        assert_eq!(spaceship_refusals(&text, target), (9, 1), "{target}: {text}");
+    }
+    // Crystal's own `<=>` is right as the value of a sort block (its last statement), and nowhere else here.
+    let (ok, text) = build(&root, "crystal");
+    assert!(!ok, "crystal: {text}");
+    assert_eq!(spaceship_refusals(&text, "crystal"), (7, 1), "crystal: {text}");
+    // TypeScript renders the numbers and refuses String by its own table: here the Symbol, Article and the two
+    // untyped sort-block receivers, and no definition (it drops `def <=>`).
+    let (ok, text) = build(&root, "typescript");
+    assert!(!ok, "typescript: {text}");
+    assert_eq!(spaceship_refusals(&text, "typescript"), (4, 0), "typescript: {text}");
+    assert!(text.contains("error[unsupported]: String#<=> not supported (typescript)"), "typescript: {text}");
+    for target in ["ruby", "jruby", "spinel"] {
+        let (ok, text) = build(&root, target);
+        assert!(ok, "{target}: {text}");
+        assert!(!text.contains("<=> not supported"), "{target}: {text}");
+    }
     std::fs::remove_dir_all(&root).unwrap();
 }
