@@ -6075,8 +6075,8 @@ end
 /// `<=>` answers an Integer where Ruby's core signatures say so (Integer,
 /// String and Symbol compared with their own kind) and Integer or nil where
 /// it can answer nil: Float (NaN), `true` and `false` (`Object#<=>`), an
-/// operand of another kind (`(untyped) -> Integer?`), a receiver that can be
-/// nil. An operand with no type yet reads as like. Typed `bool`,
+/// operand of another kind or an untyped one (`(untyped) -> Integer?`), a
+/// receiver that can be nil. Typed `bool`,
 /// `(a <=> b) * -1` read as `bool * Integer`.
 #[test]
 fn spaceship_answers_an_integer_or_nil_as_ruby_does() {
@@ -6085,6 +6085,8 @@ fn spaceship_answers_an_integer_or_nil_as_ruby_does() {
         ("str", "(String, String)"),
         ("sym", "(Symbol, Symbol)"),
         ("int_untyped", "(Integer, untyped)"),
+        ("str_untyped", "(String, untyped)"),
+        ("sym_untyped", "(Symbol, untyped)"),
         ("int_rational", "(Integer, Rational)"),
         ("float", "(Float, Float)"),
         ("bool", "(bool, bool)"),
@@ -6098,8 +6100,11 @@ fn spaceship_answers_an_integer_or_nil_as_ruby_does() {
         .iter()
         .map(|(name, sig)| format!("  #: {sig} -> untyped\n  def self.{name}(a, b)\n    (a <=> b).answer_of_{name}\n  end\n"))
         .collect();
+    // An operand never typed (no signature, no caller: still a type variable when typing ends) reads as like, unlike
+    // an `untyped` one.
     let model = format!(
-        "class Item < ApplicationRecord\n{probes}  #: (Integer, Integer) -> Integer\n  def self.reversed(a, b)\n    (a <=> b) * -1\n  end\nend\n"
+        "class Item < ApplicationRecord\n{probes}  #: (Integer, Integer) -> Integer\n  def self.reversed(a, b)\n    (a <=> b) * -1\n  end\n\n  \
+         def self.var_operand(b)\n    (1 <=> b).answer_of_var_operand\n  end\nend\n"
     );
     let app = app_from_files(&[
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -6115,10 +6120,13 @@ fn spaceship_answers_an_integer_or_nil_as_ruby_does() {
         })
     };
     let int_or_nil = Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() };
-    for name in ["int", "str", "sym", "int_untyped", "int_rational"] {
+    for name in ["int", "str", "sym", "int_rational", "var_operand"] {
         assert_eq!(answer(name), Some(Ty::Int), "{name}");
     }
-    for name in ["float", "bool", "int_float", "str_int", "sym_str", "nilable_str", "int_record"] {
+    for name in [
+        "float", "bool", "int_float", "str_int", "sym_str", "nilable_str", "int_record", "int_untyped", "str_untyped",
+        "sym_untyped",
+    ] {
         assert_eq!(answer(name), Some(int_or_nil.clone()), "{name}");
     }
     let binops: Vec<_> = diagnostics

@@ -541,7 +541,8 @@ fn run_under_tsx(emitted: &Path, script: &str) -> String {
 #[ignore]
 fn real_blog_spaceship_answers_nil_for_nan_under_tsx() {
     // `Float#<=>` answers nil when a side is NaN, as on CRuby; an Integer
-    // comparison keeps 0 for equal values. The app compiles.
+    // comparison keeps 0 for equal values; a product of `<=>` with an
+    // untyped operand of another kind raises. The app compiles.
     let (emitted, errors) = spaceship_nan::overlay().emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let script = format!(

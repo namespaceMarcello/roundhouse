@@ -3082,7 +3082,8 @@ impl<'a> BodyTyper<'a> {
             // `<=>` against an operand of another kind answers nil (core RBS:
             // `(Integer | Rational) -> Integer` beside `(untyped) -> Integer?`,
             // and the same for String and Symbol); the tables answer the like
-            // operand, and an operand not yet typed reads as like.
+            // operand. An untyped operand reads as unlike, one not yet typed
+            // as like.
             Some(recv @ (Ty::Int | Ty::Str | Ty::Sym))
                 if method.as_str() == "<=>" && args.len() == 1 && unlike_operand(recv, &args[0]) =>
             {
@@ -4512,13 +4513,14 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
     }
 }
 
-/// True when `<=>`'s operand is known to be of another kind than the
-/// Integer, String or Symbol receiver, so Ruby can answer nil. An operand
-/// with no type yet (`Var`, untyped) is not known to differ.
+/// True when `<=>`'s operand may be of another kind than the Integer,
+/// String or Symbol receiver, so Ruby can answer nil: an operand known to
+/// differ, or an untyped one (core RBS's `(untyped) -> Integer?`). An
+/// operand not typed yet (`Var`) reads as like.
 fn unlike_operand(recv: &Ty, operand: &crate::expr::Expr) -> bool {
     let Some(t) = operand.ty.as_ref() else { return false };
     match (recv, t) {
-        (_, Ty::Var { .. } | Ty::Untyped) => false,
+        (_, Ty::Var { .. }) => false,
         (Ty::Int, Ty::Int) | (Ty::Str, Ty::Str) | (Ty::Sym, Ty::Sym) => false,
         (Ty::Int, Ty::Class { id, .. }) => id.0.as_str() != "Rational",
         _ => true,
