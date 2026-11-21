@@ -2880,8 +2880,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
 ///   elsewhere, where the emit declares Integer as Int64 and drops the
 ///   parentheses of a nested operator (`(a <=> b) * -1` would order wrong).
 /// The Ruby targets run it as written. Like `report_ruby_only_sends`, the walk
-/// also reads classes these targets do not emit: library classes, and a test
-/// file's classes on Go, Elixir and Python, which leave them out.
+/// also reads classes these targets do not emit: library classes, the Rails
+/// application class, and a test file's classes on Go, Elixir and Python,
+/// which leave them out.
 fn report_untranslated_spaceship(app: &App, target: BuildTarget) {
     let typescript = matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker);
     if !typescript && !matches!(target, BuildTarget::Crystal | BuildTarget::Elixir | BuildTarget::Go
@@ -2889,17 +2890,14 @@ fn report_untranslated_spaceship(app: &App, target: BuildTarget) {
         return;
     }
     const DETAIL: &str = "this target's emit has no translation for the comparison operator";
-    // TypeScript drops a `def <=>` and refuses the explicit `<=>` calls. The definitions are read in models, library
-    // classes, and test files: the test class's own methods and the classes it defines (the calls' walk reads those).
-    if !typescript {
-        let definitions = app.models.iter().flat_map(|model| model.methods())
-            .chain(app.library_classes.iter().flat_map(|class| class.methods.iter()))
-            .chain(app.test_modules.iter().flat_map(|module| &module.helpers))
-            .chain(app.test_modules.iter().flat_map(|module| &module.inner_classes).flat_map(|class| class.methods.iter()));
-        for method in definitions.filter(|method| method.name.as_str() == "<=>") {
-            emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "def <=>", DETAIL);
+    // A `def <=>` (or an alias named `<=>`) is refused on each of these targets, wherever the app defines a method
+    // (`lower::for_each_method_name`). TypeScript too: it drops one from a model, and writes it as it is in a
+    // controller's action dispatch and in a `has_many` extension.
+    crate::lower::for_each_method_name(app, &mut |name, span| {
+        if name.as_str() == "<=>" {
+            emit::diagnostics::report_unsupported(span, target.as_str(), "def <=>", DETAIL);
         }
-    }
+    });
     // What the TypeScript emit renders or refuses itself: a number, or a String (its own table).
     fn typescript_handles(ty: Option<&crate::ty::Ty>) -> bool {
         use crate::ty::Ty;

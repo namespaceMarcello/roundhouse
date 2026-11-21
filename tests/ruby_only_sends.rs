@@ -14,8 +14,8 @@
 //!
 //! `<=>` is refused the same way, call and definition, on the targets whose
 //! emit writes the Ruby operator as it is (Crystal's own `<=>` answers an
-//! Int32 where the emit declares Integer as Int64). TypeScript renders the
-//! numeric comparison, so it is not refused there.
+//! Int32 where the emit declares Integer as Int64). TypeScript renders a
+//! numeric comparison, so that call is not refused there; a `def <=>` is.
 
 #[path = "support/scratch.rs"]
 mod scratch;
@@ -241,10 +241,10 @@ fn the_comparison_operator_is_refused_where_the_emit_writes_it_as_it_is() {
     assert!(!ok, "crystal: {text}");
     assert_eq!(spaceship_refusals(&text, "crystal"), (7, 1), "crystal: {text}");
     // TypeScript renders the numbers and refuses String by its own table: here the Symbol, Article and the two
-    // untyped sort-block receivers, and no definition (it drops `def <=>`).
+    // untyped sort-block receivers. The definition is refused too: TypeScript would drop it.
     let (ok, text) = build(&root, "typescript");
     assert!(!ok, "typescript: {text}");
-    assert_eq!(spaceship_refusals(&text, "typescript"), (4, 0), "typescript: {text}");
+    assert_eq!(spaceship_refusals(&text, "typescript"), (4, 1), "typescript: {text}");
     assert!(text.contains("error[unsupported]: String#<=> not supported (typescript)"), "typescript: {text}");
     for target in ["ruby", "jruby", "spinel"] {
         let (ok, text) = build(&root, target);
@@ -325,9 +325,9 @@ fn a_test_files_own_class_defining_the_comparison_operator_is_refused_too() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
     }
-    // Crystal, Kotlin, Rust, Swift and C# emit these classes; Go, Elixir and Python leave a test file's classes out,
-    // and are refused like the calls' walk refuses a `<=>` call there.
-    for target in ["crystal", "kotlin", "rust", "swift", "csharp", "go", "elixir", "python"] {
+    // Crystal, Kotlin, Rust, Swift and C# emit these classes, and TypeScript would drop their `def <=>`; Go, Elixir
+    // and Python leave a test file's classes out, and are refused like the calls' walk refuses a `<=>` call there.
+    for target in ["crystal", "kotlin", "rust", "swift", "csharp", "go", "elixir", "python", "typescript"] {
         let (ok, text) = build(&root, target);
         assert!(!ok, "{target}: {text}");
         assert_eq!(spaceship_refusals(&text, target), (0, 2), "{target}: {text}");
@@ -337,9 +337,150 @@ fn a_test_files_own_class_defining_the_comparison_operator_is_refused_too() {
             assert!(refused.iter().any(|line| line.contains(file)), "{target}, {file}: {text}");
         }
     }
-    // TypeScript drops `def <=>`, as it does a model's.
-    let (_ok, text) = build(&root, "typescript");
-    assert_eq!(spaceship_refusals(&text, "typescript"), (0, 0), "typescript: {text}");
+    for target in ["ruby", "jruby", "spinel"] {
+        let (ok, text) = build(&root, target);
+        assert!(ok, "{target}: {text}");
+        assert!(!text.contains("<=> not supported"), "{target}: {text}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Outside models and test files: a controller's action, its class method, another controller's private method, a
+/// third controller's `alias_method`, a `has_many` extension's method, a model's `alias`, a plain class, and the
+/// application class's method each define `<=>`. None of them calls `<=>`, so only the definitions' scan can refuse them. The plain class
+/// also defines `<=`, which is not `<=>`.
+const SPACESHIP_ACTIONS: &str = r#"class ArticlesController < ApplicationController
+  def index
+    @articles = Article.all
+  end
+
+  def <=>(other)
+    0
+  end
+
+  def self.<=>(other)
+    0
+  end
+end
+"#;
+
+const SPACESHIP_PRIVATE: &str = r#"class CommentsController < ApplicationController
+  def index
+    @comments = Comment.all
+  end
+
+  private
+
+  def <=>(other)
+    0
+  end
+end
+"#;
+
+const SPACESHIP_EXTENSION: &str = r#"class Article < ApplicationRecord
+  has_many :comments do
+    def <=>(other)
+      0
+    end
+  end
+end
+"#;
+
+const SPACESHIP_LIBRARY: &str = r#"class Version
+  def <=>(other)
+    0
+  end
+
+  def <=(other)
+    true
+  end
+end
+"#;
+
+const SPACESHIP_CONTROLLER_ALIAS: &str = r#"class VersionsController < ApplicationController
+  def index
+    @count = 0
+  end
+
+  alias_method :<=>, :index
+end
+"#;
+
+const SPACESHIP_ALIAS: &str = r#"class Comment < ApplicationRecord
+  belongs_to :article
+
+  def cmp(other)
+    0
+  end
+  alias <=> cmp
+end
+"#;
+
+const SPACESHIP_APPLICATION: &str = r#"require_relative "boot"
+require "rails/all"
+
+module Blog
+  class Application < Rails::Application
+    config.load_defaults 8.0
+
+    def <=>(other)
+      0
+    end
+  end
+end
+"#;
+
+#[test]
+fn a_controller_an_extension_or_the_application_defining_the_comparison_operator_is_refused_too() {
+    let root = scratch::dir("rh_ruby_only_sends_spaceship_holders");
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\n\n  \
+             create_table \"comments\" do |t|\n    t.integer \"article_id\"\n    t.string \"body\"\n  end\nend\n",
+        ),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", SPACESHIP_EXTENSION),
+        ("app/models/comment.rb", SPACESHIP_ALIAS),
+        ("app/models/version.rb", SPACESHIP_LIBRARY),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+        ("app/controllers/articles_controller.rb", SPACESHIP_ACTIONS),
+        ("app/controllers/comments_controller.rb", SPACESHIP_PRIVATE),
+        ("app/controllers/versions_controller.rb", SPACESHIP_CONTROLLER_ALIAS),
+        ("app/views/articles/index.html.erb", "<p><%= @articles.size %></p>\n"),
+        ("app/views/comments/index.html.erb", "<p><%= @comments.size %></p>\n"),
+        ("app/views/versions/index.html.erb", "<p><%= @count %></p>\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :articles, only: [:index]\n  resources :comments, only: [:index]\n  \
+             resources :versions, only: [:index]\nend\n",
+        ),
+        ("config/application.rb", SPACESHIP_APPLICATION),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+    for target in ["crystal", "kotlin", "rust", "swift", "csharp", "go", "elixir", "python", "typescript"] {
+        let (ok, text) = build(&root, target);
+        assert!(!ok, "{target}: {text}");
+        assert_eq!(spaceship_refusals(&text, target), (0, 8), "{target}: {text}");
+        let refused: Vec<&str> =
+            text.lines().filter(|line| line.contains(&format!("def <=> not supported ({target})"))).collect();
+        for (file, count) in [
+            ("/articles_controller.rb:", 2),
+            ("/comments_controller.rb:", 1),
+            ("/versions_controller.rb:", 1),
+            ("/article.rb:", 1),
+            ("/comment.rb:", 1),
+            ("/version.rb:", 1),
+            ("/application.rb:", 1),
+        ] {
+            assert_eq!(refused.iter().filter(|line| line.contains(file)).count(), count, "{target}, {file}: {text}");
+        }
+        // At the method's name, not at its body or its class.
+        assert!(refused.iter().any(|line| line.contains("/version.rb:2:7:")), "{target}: {text}");
+    }
     for target in ["ruby", "jruby", "spinel"] {
         let (ok, text) = build(&root, target);
         assert!(ok, "{target}: {text}");
