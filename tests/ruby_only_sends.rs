@@ -253,3 +253,97 @@ fn the_comparison_operator_is_refused_where_the_emit_writes_it_as_it_is() {
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// Test files: a `def <=>` (whose body calls no `<=>`) in a class a test file defines, and one in the test class
+/// itself, are refused like a model's. The files and classes before them define no `<=>`, so a scan that reads only
+/// the first test file or the first class finds nothing.
+const PLAIN_TEST: &str = r#"require "test_helper"
+
+class AardvarkTest < ActiveSupport::TestCase
+  class Plain
+    def n = 1
+  end
+
+  test "plain" do
+    assert Plain.new.n == 1
+  end
+end
+"#;
+
+const OWN_DEF_TEST: &str = r#"require "test_helper"
+
+class OwnDefTest < ActiveSupport::TestCase
+  def <=>(other)
+    0
+  end
+
+  test "own" do
+    assert true
+  end
+end
+"#;
+
+const SPACESHIP_TEST: &str = r#"require "test_helper"
+
+class VersionTest < ActiveSupport::TestCase
+  class Label
+    def text = "v"
+  end
+
+  class Version
+    include Comparable
+    attr_reader :n
+
+    def initialize(n)
+      @n = n
+    end
+
+    def <=>(other)
+      n - other.n
+    end
+  end
+
+  test "versions order" do
+    assert Version.new(1) < Version.new(2)
+  end
+end
+"#;
+
+#[test]
+fn a_test_files_own_class_defining_the_comparison_operator_is_refused_too() {
+    let root = scratch::dir("rh_ruby_only_sends_spaceship_test_class");
+    for (path, text) in [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
+        ("test/test_helper.rb", "ENV[\"RAILS_ENV\"] ||= \"test\"\nrequire_relative \"../config/environment\"\nrequire \"rails/test_help\"\n"),
+        ("test/models/aardvark_test.rb", PLAIN_TEST),
+        ("test/models/own_def_test.rb", OWN_DEF_TEST),
+        ("test/models/version_test.rb", SPACESHIP_TEST),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+    // Crystal, Kotlin, Rust, Swift and C# emit these classes; Go, Elixir and Python leave a test file's classes out,
+    // and are refused like the calls' walk refuses a `<=>` call there.
+    for target in ["crystal", "kotlin", "rust", "swift", "csharp", "go", "elixir", "python"] {
+        let (ok, text) = build(&root, target);
+        assert!(!ok, "{target}: {text}");
+        assert_eq!(spaceship_refusals(&text, target), (0, 2), "{target}: {text}");
+        let refused: Vec<&str> =
+            text.lines().filter(|line| line.contains(&format!("def <=> not supported ({target})"))).collect();
+        for file in ["own_def_test.rb:", "version_test.rb:"] {
+            assert!(refused.iter().any(|line| line.contains(file)), "{target}, {file}: {text}");
+        }
+    }
+    // TypeScript drops `def <=>`, as it does a model's.
+    let (_ok, text) = build(&root, "typescript");
+    assert_eq!(spaceship_refusals(&text, "typescript"), (0, 0), "typescript: {text}");
+    for target in ["ruby", "jruby", "spinel"] {
+        let (ok, text) = build(&root, target);
+        assert!(ok, "{target}: {text}");
+        assert!(!text.contains("<=> not supported"), "{target}: {text}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
