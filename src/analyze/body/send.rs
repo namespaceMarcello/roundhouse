@@ -4413,7 +4413,9 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // verifier's constant-time `secure_compare`).
         "getbyte" => Ty::Int,
         // `setbyte(i, byte)` → the byte written (the CSRF token's XOR
-        // writes over a copy, a byte at a time).
+        // writes over a copy, a byte at a time). Only the ruby family
+        // and spinel run it: the strict targets refuse the call by name
+        // (`report_ruby_only_sends`).
         "setbyte" => Ty::Int,
         // `byteslice(start, length)` — the bytes in that range, or nil
         // when `start` lies past the end. campfire truncates a SHA-256

@@ -446,6 +446,10 @@ mod io_process_constants;
 mod backticks_contract;
 #[path = "emit_and_run/backticks.rs"]
 mod backticks;
+#[path = "support/string_setbyte.rs"]
+mod string_setbyte_contract;
+#[path = "emit_and_run/string_setbyte.rs"]
+mod string_setbyte;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "emit_and_run/json_params.rs"]
